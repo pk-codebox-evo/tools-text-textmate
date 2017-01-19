@@ -6,7 +6,7 @@ namespace cf
 	run_loop_t::run_loop_t (CFStringRef mode, double timeout) : _should_stop(false), _timeout(timeout)
 	{
 		struct helper_t {
-			static void wake_up (void* arg) { ((run_loop_t*)arg)->_should_stop = true; }
+			static void wake_up (void* arg) { static_cast<run_loop_t*>(arg)->_should_stop = true; }
 		};
 
 		_mode = mode;
@@ -14,7 +14,7 @@ namespace cf
 		_run_loop = CFRunLoopGetCurrent();
 		CFRetain(_run_loop);
 
-		CFRunLoopSourceContext context = { 0, this, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &helper_t::wake_up };
+		CFRunLoopSourceContext context = { 0, this, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &helper_t::wake_up };
 		_source = CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &context);
 		CFRunLoopAddSource(_run_loop, _source, _mode);
 	}

@@ -1,6 +1,6 @@
 #import <oak/debug.h>
 #import <OakSystem/application.h>
-#import <DocumentWindow/DocumentController.h>
+#import <DocumentWindow/DocumentWindowController.h>
 #import <io/path.h>
 #import <text/format.h>
 #import <crash/info.h>
@@ -20,7 +20,7 @@ static void sig_int_handler (void* unused)
 static void sig_term_handler (void* unused)
 {
 	fprintf(stderr, "%s received SIGTERM: Quick shutdown.\n", getprogname());
-	[DocumentController saveSessionIncludingUntitledDocuments:YES];
+	[DocumentWindowController saveSessionIncludingUntitledDocuments:YES];
 	[[NSNotificationCenter defaultCenter] postNotificationName:NSApplicationWillTerminateNotification object:NSApp];
 	[NSApp stop:nil];
 	[NSApp postEvent:[NSEvent otherEventWithType:NSApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:NULL subtype:0 data1:0 data2:0] atStart:NO];
@@ -57,13 +57,28 @@ int main (int argc, char const* argv[])
 			if([variable hasPrefix:@"TM_"])
 				unsetenv([variable UTF8String]);
 		}
+
+		if([NSUserDefaults instancesRespondToSelector:@selector(initWithSuiteName:)])
+		{
+			NSUserDefaults* oldDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.macromates.TextMate.preview"];
+			if([oldDefaults boolForKey:@"didMigrateBetaSettings"] == NO)
+			{
+				NSUserDefaults* newDefaults = [NSUserDefaults standardUserDefaults];
+				for(NSString* key in [oldDefaults dictionaryRepresentation].allKeys)
+				{
+					if([newDefaults objectForKey:key] == nil)
+						[newDefaults setObject:[oldDefaults objectForKey:key] forKey:key];
+				}
+				[oldDefaults setBool:YES forKey:@"didMigrateBetaSettings"];
+			}
+		}
 	}
 
 	try {
 		return NSApplicationMain(argc, argv);
 	}
 	catch(std::exception const& e) {
-		crash_reporter_info_t info(text::format("C++ Exception: %s", e.what()));
+		crash_reporter_info_t info("C++ Exception: %s", e.what());
 		abort();
 	}
 }

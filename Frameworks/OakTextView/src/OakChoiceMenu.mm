@@ -26,6 +26,7 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 	{
 		_choices = [NSArray array];
 		_choiceIndex = NSNotFound;
+		_font = [NSFont controlContentFontOfSize:0];
 	}
 	return self;
 }
@@ -41,7 +42,10 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 	CGFloat const kTableViewPadding = 4;
 	CGFloat const kScrollBarWidth   = 15;
 
-	NSTextField* textField = OakCreateLabel(@"", [NSFont controlContentFontOfSize:0]);
+	NSTextField* textField = OakCreateLabel(@"", self.font, NSLeftTextAlignment, NSLineBreakByTruncatingTail);
+	if(_choices.count == 0)
+		[textField sizeToFit];
+
 	CGFloat width = 60;
 	for(NSInteger i = 0; i < MIN(_choices.count, 256); ++i)
 	{
@@ -49,6 +53,8 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 		[textField sizeToFit];
 		width = std::max(width, kTableViewPadding + NSWidth(textField.frame));
 	}
+
+	tableView.rowHeight = NSHeight(textField.frame);
 
 	if([_choices count] > 10)
 		width += kScrollBarWidth;
@@ -125,7 +131,7 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 	NSTextField* res = [aTableView makeViewWithIdentifier:identifier owner:self];
 	if(!res)
 	{
-		res = OakCreateLabel(@"", [NSFont controlContentFontOfSize:0]);
+		res = OakCreateLabel(@"", self.font, NSLeftTextAlignment, NSLineBreakByTruncatingTail);
 		res.identifier = identifier;
 	}
 	return res;
@@ -134,8 +140,7 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 - (void)showAtTopLeftPoint:(NSPoint)aPoint forView:(NSView*)aView
 {
 	_window = [[NSPanel alloc] initWithContentRect:NSMakeRect(aPoint.x, aPoint.y, 0, 0) styleMask:NSBorderlessWindowMask backing:NSBackingStoreBuffered defer:NO];
-	[_window setReleasedWhenClosed:NO];
-	[_window setOpaque:NO];
+	_window.opaque             = NO;
 	_window.alphaValue         = 0.97;
 	_window.backgroundColor    = [NSColor colorWithCalibratedRed:1.00 green:0.96 blue:0.76 alpha:1];
 	_window.hasShadow          = YES;
@@ -215,28 +220,35 @@ enum action_t { kActionNop, kActionTab, kActionReturn, kActionCancel, kActionMov
 
 - (void)doCommandBySelector:(SEL)aSelector
 {
-	if([self respondsToSelector:aSelector])
-		[super doCommandBySelector:aSelector];
+	static std::map<SEL, NSUInteger> const map = {
+		{ @selector(insertNewline:),                               kActionReturn          },
+		{ @selector(insertNewlineIgnoringFieldEditor:),            kActionReturn          },
+		{ @selector(insertTab:),                                   kActionTab             },
+		{ @selector(cancelOperation:),                             kActionCancel          },
+		{ @selector(moveUp:),                                      kActionMoveUp          },
+		{ @selector(moveDown:),                                    kActionMoveDown        },
+		{ @selector(moveUpAndModifySelection:),                    kActionMoveUp          },
+		{ @selector(moveDownAndModifySelection:),                  kActionMoveDown        },
+		{ @selector(pageUp:),                                      kActionPageUp          },
+		{ @selector(pageDown:),                                    kActionPageDown        },
+		{ @selector(pageUpAndModifySelection:),                    kActionPageUp          },
+		{ @selector(pageDownAndModifySelection:),                  kActionPageDown        },
+		{ @selector(moveToBeginningOfDocument:),                   kActionMoveToBeginning },
+		{ @selector(moveToEndOfDocument:),                         kActionMoveToEnd       },
+		{ @selector(moveToBeginningOfDocumentAndModifySelection:), kActionMoveToBeginning },
+		{ @selector(moveToEndOfDocumentAndModifySelection:),       kActionMoveToEnd       },
+		{ @selector(scrollPageUp:),                                kActionPageUp          },
+		{ @selector(scrollPageDown:),                              kActionPageDown        },
+		{ @selector(scrollToBeginningOfDocument:),                 kActionMoveToBeginning },
+		{ @selector(scrollToEndOfDocument:),                       kActionMoveToEnd       },
+	};
+
+	auto it = map.find(aSelector);
+	if(it != map.end())
+		keyAction = it->second;
 }
 
-- (void)insertText:(id)aString                 { }
-
-- (void)insertNewline:(id)sender               { keyAction = kActionReturn;           }
-- (void)insertTab:(id)sender                   { keyAction = kActionTab;              }
-- (void)cancelOperation:(id)sender             { keyAction = kActionCancel;           }
-
-- (void)moveUp:(id)sender                      { keyAction = kActionMoveUp;           }
-- (void)moveDown:(id)sender                    { keyAction = kActionMoveDown;         }
-
-- (void)movePageUp:(id)sender                  { keyAction = kActionPageUp;           }
-- (void)movePageDown:(id)sender                { keyAction = kActionPageDown;         }
-- (void)pageUp:(id)sender                      { keyAction = kActionPageUp;           }
-- (void)pageDown:(id)sender                    { keyAction = kActionPageDown;         }
-- (void)scrollPageUp:(id)sender                { keyAction = kActionPageUp;           }
-- (void)scrollPageDown:(id)sender              { keyAction = kActionPageDown;         }
-
-- (void)moveToBeginningOfDocument:(id)sender   { keyAction = kActionMoveToBeginning;  }
-- (void)moveToEndOfDocument:(id)sender         { keyAction = kActionMoveToEnd;        }
-- (void)scrollToBeginningOfDocument:(id)sender { keyAction = kActionMoveToBeginning;  }
-- (void)scrollToEndOfDocument:(id)sender       { keyAction = kActionMoveToEnd;        }
+- (void)insertText:(id)aString
+{
+}
 @end

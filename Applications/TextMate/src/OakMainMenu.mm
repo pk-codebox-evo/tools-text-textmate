@@ -71,13 +71,13 @@ static CGPoint MenuPosition ()
 - (BOOL)performKeyEquivalent:(NSEvent*)anEvent
 {
 	std::string const keyString = to_s(anEvent);
-	crash_reporter_info_t crashInfo(text::format("Key equivalent ‘%s’.", keyString.c_str()));
+	crash_reporter_info_t info("Key equivalent ‘%s’.", keyString.c_str());
 
 	auto const bundleItems = bundles::query(bundles::kFieldKeyEquivalent, keyString, "", bundles::kItemTypeCommand|bundles::kItemTypeGrammar|bundles::kItemTypeSnippet);
 	if(!bundleItems.empty())
 	{
 		if(bundles::item_ptr item = OakShowMenuForBundleItems(bundleItems, MenuPosition()))
-			[NSApp sendAction:@selector(performBundleItemWithUUIDString:) to:nil from:[NSString stringWithCxxString:item->uuid()]];
+			[NSApp sendAction:@selector(performBundleItemWithUUIDStringFrom:) to:nil from:@{ @"representedObject" : to_ns(item->uuid()) }];
 		return YES;
 	}
 

@@ -154,7 +154,7 @@ int main (int argc, char const* argv[])
 	std::string installDir = NULL_STR;
 
 	unsigned int ch;
-	while((ch = getopt_long(argc, (char* const*)argv, "s:C:hv", longopts, NULL)) != -1)
+	while((ch = getopt_long(argc, (char* const*)argv, "s:C:hv", longopts, nullptr)) != -1)
 	{
 		switch(ch)
 		{
@@ -365,7 +365,7 @@ int main (int argc, char const* argv[])
 	}
 	else if(command == "dependents")
 	{
-		for(auto const& bundle : dependents(index, filtered_bundles(index, sourceNames, bundleNames)))
+		for(auto const& bundle : dependents(index, filtered_bundles(index, sourceNames, bundleNames), false))
 			fprintf(stdout, "%s\n", short_bundle_info(bundle, get_width()).c_str());
 	}
 	else

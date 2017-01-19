@@ -1,5 +1,6 @@
 #import "Favorites.h"
 #import <OakFilterList/OakAbbreviations.h>
+#import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakFileIconImage.h>
 #import <OakAppKit/OakUIConstructionFunctions.h>
 #import <OakAppKit/OakScopeBarView.h>
@@ -31,7 +32,7 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 @implementation FavoriteChooser
 + (instancetype)sharedInstance
 {
-	static id sharedInstance = [self new];
+	static FavoriteChooser* sharedInstance = [self new];
 	return sharedInstance;
 }
 
@@ -56,8 +57,15 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 		_sourceListLabels = @[ @"Recent Projects", @"Favorites" ];
 
 		self.window.title = @"Open Recent Project";
+		self.tableView.allowsTypeSelect = NO;
 		self.tableView.allowsMultipleSelection = YES;
+		self.tableView.refusesFirstResponder = NO;
 		self.tableView.rowHeight = 38;
+
+		self.window.nextResponder = nil;
+		NSResponder* nextResponder = self.tableView.nextResponder;
+		self.tableView.nextResponder = self;
+		self.nextResponder = nextResponder;
 
 		OakScopeBarView* scopeBar = [OakScopeBarView new];
 		scopeBar.labels = self.sourceListLabels;
@@ -76,7 +84,7 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 
 		NSView* contentView = self.window.contentView;
 		OakAddAutoLayoutViewsToSuperview([views allValues], contentView);
-		OakSetupKeyViewLoop(@[ self.searchField, scopeBar ]);
+		OakSetupKeyViewLoop(@[ self.tableView, self.searchField, scopeBar ]);
 
 		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|-(8)-[searchField(>=50)]-(8)-|"                      options:0 metrics:nil views:views]];
 		[contentView addConstraints:[NSLayoutConstraint constraintsWithVisualFormat:@"H:|[aboveScopeBarDark(==aboveScopeBarLight)]|"          options:0 metrics:nil views:views]];
@@ -101,6 +109,7 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 	{
 		NSButton* removeButton = [NSButton new];
 		[[removeButton cell] setControlSize:NSSmallControlSize];
+		removeButton.refusesFirstResponder = YES;
 		removeButton.bezelStyle = NSRoundRectBezelStyle;
 		removeButton.buttonType = NSMomentaryPushInButton;
 		removeButton.image      = [NSImage imageNamed:NSImageNameRemoveTemplate];
@@ -286,7 +295,7 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 	[super accept:sender];
 }
 
-- (void)removeItemsAtIndexes:(NSIndexSet*)anIndexSet
+- (NSUInteger)removeItemsAtIndexes:(NSIndexSet*)anIndexSet
 {
 	NSMutableArray* items = [self.items mutableCopy];
 	anIndexSet = [anIndexSet indexesPassingTest:^BOOL(NSUInteger idx, BOOL* stop){
@@ -302,7 +311,7 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 	}
 
 	[self loadItems:self]; // update originalItems
-	[super removeItemsAtIndexes:anIndexSet];
+	return [super removeItemsAtIndexes:anIndexSet];
 }
 
 - (void)takeItemToRemoveFrom:(NSButton*)sender
@@ -310,11 +319,6 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 	NSInteger row = [self.tableView rowForView:sender];
 	if(row != -1)
 		[self removeItemsAtIndexes:[NSIndexSet indexSetWithIndex:row]];
-}
-
-- (void)delete:(id)sender
-{
-	[self removeItemsAtIndexes:[self.tableView selectedRowIndexes]];
 }
 
 - (void)takeSourceIndexFrom:(id)sender
@@ -343,4 +347,50 @@ static NSUInteger const kOakSourceIndexFavorites      = 1;
 		[item setState:[item tag] == self.sourceIndex ? NSOnState : NSOffState];
 	return activate;
 }
+
+- (void)deleteForward:(id)sender
+{
+	NSUInteger itemsRemoved = [self removeItemsAtIndexes:[self.tableView selectedRowIndexes]];
+	if(itemsRemoved == 0)
+		NSBeep();
+}
+
+- (void)deleteBackward:(id)sender
+{
+	NSUInteger index = [[self.tableView selectedRowIndexes] firstIndex];
+	NSUInteger itemsRemoved = [self removeItemsAtIndexes:[self.tableView selectedRowIndexes]];
+	if(itemsRemoved == 0)
+		NSBeep();
+	else if(index && index != NSNotFound && self.tableView.numberOfRows)
+		[self.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:index-1] byExtendingSelection:NO];
+}
+
+- (void)insertText:(id)aString
+{
+	self.filterString = aString;
+	[self.window makeFirstResponder:self.searchField];
+	NSText* fieldEditor = (NSText*)[self.window firstResponder];
+	if([fieldEditor isKindOfClass:[NSText class]])
+		[fieldEditor setSelectedRange:NSMakeRange([[fieldEditor string] length], 0)];
+}
+
+- (void)doCommandBySelector:(SEL)aSelector
+{
+	if([self respondsToSelector:aSelector])
+	{
+		[super doCommandBySelector:aSelector];
+	}
+	else
+	{
+		NSUInteger res = OakPerformTableViewActionFromSelector(self.tableView, aSelector);
+		if(res == OakMoveAcceptReturn)
+			[self accept:self];
+		else if(res == OakMoveCancelReturn)
+			[self cancel:self];
+	}
+}
+
+- (void)keyDown:(NSEvent*)anEvent  { [self interpretKeyEvents:@[ anEvent ]]; }
+- (void)insertTab:(id)sender       { [self.window selectNextKeyView:self]; }
+- (void)insertBacktab:(id)sender   { [self.window selectPreviousKeyView:self]; }
 @end

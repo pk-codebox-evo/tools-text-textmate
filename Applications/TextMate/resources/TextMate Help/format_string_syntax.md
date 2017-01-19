@@ -25,8 +25,8 @@ title: Format string syntax
 
 	«variables»
 
-	(?«var»:«if»:«else»}
-	(?«var»:«if»}
+	(?«var»:«if»:«else»)
+	(?«var»:«if»)
 
 ## In Both
 
@@ -36,5 +36,5 @@ title: Format string syntax
 	${«var»:+«if»}
 	${«var»:-«else»}
 	${«var»:«else»}
+	${«var»:[/upcase][/downcase][/(capitalize|titlecase)][/asciify]}
 	${«var»/«regexp»/«format»/«options»}
-	${«var»:[/upcase][/downcase][/capitalize][/asciify]}

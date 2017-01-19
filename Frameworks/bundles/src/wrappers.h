@@ -12,7 +12,7 @@ namespace bundles
 
 	struct PUBLIC required_command_t
 	{
-		required_command_t (std::string const& command = NULL_STR, std::string moreInfoUrl = NULL_STR, std::string const& variable = NULL_STR, std::vector<std::string> const& locations = std::vector<std::string>());
+		required_command_t (std::string const& command = NULL_STR, std::string const& moreInfoUrl = NULL_STR, std::string const& variable = NULL_STR, std::vector<std::string> const& locations = std::vector<std::string>());
 
 		std::string command;
 		std::string more_info_url;
@@ -26,7 +26,6 @@ namespace bundles
 	PUBLIC std::map<std::string, std::string> scope_variables (std::map<std::string, std::string> const& base, scope::context_t const& scope = scope::context_t());
 	PUBLIC plist::any_t value_for_setting (std::string const& setting, scope::context_t const& scope, item_ptr* match = NULL);
 
-	PUBLIC std::vector<item_ptr> grammars_for_path (std::string const& path);
 	PUBLIC std::vector<item_ptr> drag_commands_for_path (std::string const& ext, scope::context_t const& scope);
 
 } /* bundles */

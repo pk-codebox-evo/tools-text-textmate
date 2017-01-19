@@ -1,22 +1,22 @@
 #import "OakDocument Private.h"
+#import "OakDocumentController.h"
 #import "OakDocumentEditor.h"
 #import "EncodingView.h"
 #import "Printing.h"
 #import "watch.h"
 #import "merge.h"
-#import "document.h" // kBookmarkIdentifier
 #import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSString Additions.h>
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakEncodingPopUpButton.h>
 #import <OakAppKit/OakSavePanel.h>
 #import <OakAppKit/NSAlert Additions.h>
+#import <OakAppKit/OakFileIconImage.h>
 #import <BundlesManager/BundlesManager.h>
 #import <authorization/constants.h>
 #import <cf/run_loop.h>
 #import <ns/ns.h>
 #import <settings/settings.h>
-#import <settings/volume.h>
 #import <buffer/buffer.h>
 #import <undo/undo.h>
 #import <selection/types.h>
@@ -98,7 +98,7 @@ namespace document
 		{
 			auto marks = _paths.find(path);
 			if(marks == _paths.end())
-				marks = _paths.emplace(path, std::map<std::string, std::map<text::pos_t, std::string>>{ { kBookmarkIdentifier, load_bookmarks(path) } }).first;
+				marks = _paths.emplace(path, std::map<std::string, std::map<text::pos_t, std::string>>{ { to_s(OakDocumentBookmarkIdentifier), load_bookmarks(path) } }).first;
 			return marks->second;
 		}
 
@@ -140,6 +140,22 @@ namespace document
 
 } /* document */
 
+// ===================================
+// = OakDocumentMatch Implementation =
+// ===================================
+
+@implementation OakDocumentMatch
+- (NSUInteger)lineNumber
+{
+	return _range.from.line;
+}
+
+- (NSString*)description
+{
+	return [NSString stringWithFormat:@"<%@:%ld:%@>", _document.displayName, self.lineNumber, _excerpt];
+}
+@end
+
 // ==============================
 // = OakDocument Implementation =
 // ==============================
@@ -152,12 +168,16 @@ NSString* OakDocumentWillSaveNotification         = @"OakDocumentWillSaveNotific
 NSString* OakDocumentDidSaveNotification          = @"OakDocumentDidSaveNotification";
 NSString* OakDocumentWillCloseNotification        = @"OakDocumentWillCloseNotification";
 NSString* OakDocumentWillShowAlertNotification    = @"OakDocumentWillShowAlertNotification";
+NSString* OakDocumentBookmarkIdentifier           = @"bookmark";
 
 @interface OakDocument ()
 {
 	OBJC_WATCH_LEAKS(OakDocument);
 
 	NSHashTable* _documentEditors;
+	scm::status::type _scmStatus;
+	OakFileIconImage* _icon;
+	NSString* _cachedDisplayName;
 
 	std::unique_ptr<ng::buffer_t> _buffer;
 	std::unique_ptr<ng::detail::storage_t> _snapshot;
@@ -170,60 +190,32 @@ NSString* OakDocumentWillShowAlertNotification    = @"OakDocumentWillShowAlertNo
 }
 @property (nonatomic) NSUInteger untitledCount;
 @property (nonatomic) NSUInteger openCount;
-@property (nonatomic, getter = isBufferEmpty) BOOL bufferEmpty;
+@property (nonatomic, getter = isLoaded, readwrite) BOOL loaded;
+@property (nonatomic, getter = isBufferEmpty, readwrite) BOOL bufferEmpty;
+@property (nonatomic) NSInteger revision;
+@property (nonatomic) NSInteger savedRevision;
 @property (nonatomic) NSInteger backupRevision;
 @property (nonatomic) BOOL observeFileSystem;
 @property (nonatomic) BOOL needsImportDocumentChanges;
 @property (nonatomic, readonly) BOOL shouldSniffFileType;
 
+@property (nonatomic) BOOL                               observeSCMStatus;
+@property (nonatomic) scm::info_ptr                      scmInfo;
+@property (nonatomic) std::map<std::string, std::string> scmVariables;
+@property (nonatomic, readwrite) scm::status::type       scmStatus;
+
 @property (nonatomic) NSArray<void(^)(OakDocumentIOResult, NSString*, oak::uuid_t const&)>* loadCompletionHandlers;
 
 // These are also exposed in ‘OakDocument Private.h’
-@property (nonatomic) NSInteger   revision;
-@property (nonatomic) NSInteger   savedRevision;
-@property (nonatomic) NSString*   backupPath;
-@property (nonatomic) NSString*   folded;
+@property (nonatomic) NSString* folded;
 @end
 
-static struct document_container_t
-{
-	void add (OakDocument* document)
-	{
-		std::lock_guard<std::mutex> lock(_lock);
-		[_documents addObject:document];
-	}
-
-	void set_untitled_count (OakDocument* document)
-	{
-		std::lock_guard<std::mutex> lock(_lock);
-
-		std::set<NSUInteger> reserved;
-		for(OakDocument* document in _documents)
-		{
-			if(!document.path && !document.customName)
-				reserved.insert(document.untitledCount);
-		}
-
-		NSUInteger available = 1;
-		while(reserved.find(available) != reserved.end())
-			++available;
-		document.untitledCount = available;
-	}
-
-	void remove_all_marks (NSString* mark)
-	{
-		std::lock_guard<std::mutex> lock(_lock);
-		for(OakDocument* document : _documents)
-			[document removeAllMarksOfType:mark];
-	}
-
-private:
-	std::mutex _lock;
-	NSHashTable* _documents = [NSHashTable weakObjectsHashTable];
-
-} DocumentContainer;
-
 @implementation OakDocument
++ (NSSet*)keyPathsForValuesAffectingIcon
+{
+	return [NSSet setWithObjects:@"path", @"onDisk", @"virtualPath", @"documentEdited", @"scmStatus", nil];
+}
+
 + (NSSet*)keyPathsForValuesAffectingDisplayName
 {
 	return [NSSet setWithObjects:@"path", @"customName", @"untitledCount", nil];
@@ -241,7 +233,8 @@ private:
 
 - (NSString*)description
 {
-	return [NSString stringWithFormat:@"<%@: %@>", [self class], self.displayName];
+	NSString* displayName = _path || !_directory ? self.displayName : [self.displayName stringByAppendingFormat:@" (%@)", _directory];
+	return [NSString stringWithFormat:@"<%@: %@>", [self class], displayName];
 }
 
 // ==================
@@ -269,8 +262,8 @@ private:
 - (std::map<std::string, std::string>)variables
 {
 	std::map<std::string, std::string> variables = {
-		{ "TM_DISPLAYNAME",   to_s(self.displayName)           },
-		{ "TM_DOCUMENT_UUID", to_s(self.identifier.UUIDString) },
+		{ "TM_DISPLAYNAME",   to_s(self.displayName) },
+		{ "TM_DOCUMENT_UUID", to_s(self.identifier)  },
 	};
 
 	if(_path)
@@ -288,7 +281,7 @@ private:
 	if(!_buffer)
 		return;
 
-	settings_t const settings = settings_for_path(to_s(_virtualPath ?: _path), to_s(_fileType), to_s(_directory ?: [_path stringByDeletingLastPathComponent]), self.variables);
+	settings_t const settings = settings_for_path(to_s(_virtualPath ?: _path), to_s(_fileType), to_s([_path stringByDeletingLastPathComponent] ?: _directory), self.variables);
 	if(updateSpelling)
 	{
 		self.spellingLanguage = to_ns(settings.get(kSettingsSpellingLanguageKey, ""));
@@ -309,9 +302,8 @@ private:
 	if(self = [super init])
 	{
 		_identifier = [NSUUID UUID];
+		_bufferEmpty = YES;
 		_documentEditors = [NSHashTable weakObjectsHashTable];
-
-		DocumentContainer.add(self);
 	}
 	return self;
 }
@@ -321,7 +313,7 @@ private:
 	if(self = [self init])
 	{
 		_path   = aPath;
-		_onDisk = access([_path fileSystemRepresentation], F_OK) == 0;
+		_onDisk = _path && access([_path fileSystemRepresentation], F_OK) == 0;
 	}
 	return self;
 }
@@ -348,61 +340,98 @@ private:
 	return self;
 }
 
-- (instancetype)initWithIdentifier:(NSUUID*)anIdentifier
+- (instancetype)initWithBackupPath:(NSString*)backupPath
 {
+	if(self = [self init])
+	{
+		std::string const path = to_s(backupPath);
+		_identifier     = [[NSUUID alloc] initWithUUIDString:to_ns(path::get_attr(path, "com.macromates.backup.identifier"))];
+		_backupPath     = backupPath;
+
+		_path           = to_ns(path::resolve(path::get_attr(path, "com.macromates.backup.path")));
+		_onDisk         = _path && access([_path fileSystemRepresentation], F_OK) == 0;
+		_fileType       = to_ns(path::get_attr(path, "com.macromates.backup.file-type"));
+		_diskEncoding   = to_ns(path::get_attr(path, "com.macromates.backup.encoding"));
+		_diskNewlines   = to_ns(path::get_attr(path, "com.macromates.backup.newlines"));
+		_customName     = to_ns(path::get_attr(path, "com.macromates.backup.custom-name"));
+		_untitledCount  = atoi(path::get_attr(path, "com.macromates.backup.untitled-count").c_str());
+
+		if(path::get_attr(path, "com.macromates.backup.modified") == "YES")
+			_savedRevision = _revision-1;
+	}
+	return self;
+}
+
+- (BOOL)tryLoadBackup
+{
+	if(self.isLoaded || !_backupPath)
+		return NO;
+
+	ASSERT(!_buffer);
+
+	BOOL isModified = self.isDocumentEdited;
+	std::string const path = to_s(_backupPath);
+	[self didLoadContent:std::make_shared<io::bytes_t>(path::content(path)) attributes:path::attributes(path) encoding:encoding::type(to_s(_diskNewlines), to_s(_diskEncoding))];
+
+	if(isModified)
+	{
+		_snapshot.reset();
+		self.savedRevision = _revision-1;
+	}
+
+	return YES;
+}
+
++ (instancetype)documentWithPath:(NSString*)aPath
+{
+	return [OakDocumentController.sharedInstance documentWithPath:aPath];
+}
+
++ (instancetype)documentWithData:(NSData*)someData fileType:(NSString*)aFileType customName:(NSString*)aName
+{
+	OakDocument* res = [[OakDocument alloc] initWithData:someData fileType:aFileType customName:aName];
+	[OakDocumentController.sharedInstance register:res];
+	return res;
+}
+
++ (instancetype)documentWithString:(NSString*)content fileType:(NSString*)aFileType customName:(NSString*)aName
+{
+	return [OakDocument documentWithData:[content dataUsingEncoding:NSUTF8StringEncoding] fileType:aFileType customName:aName];
+}
+
++ (instancetype)documentWithIdentifier:(NSUUID*)anIdentifier
+{
+	if(OakDocument* res = [OakDocumentController.sharedInstance findDocumentWithIdentifier:anIdentifier])
+		return res;
+
 	std::string const dir = to_s([[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject] stringByAppendingPathComponent:@"TextMate/Session"]);
 	for(auto dirEntry : path::entries(dir))
 	{
 		std::string const path = path::join(dir, dirEntry->d_name);
 		std::string const uuid = path::get_attr(path, "com.macromates.backup.identifier");
-		if(uuid == NULL_STR || ![anIdentifier isEqual:[[NSUUID alloc] initWithUUIDString:to_ns(uuid)]])
-			continue;
-
-		if(self = [self init])
+		if(uuid != NULL_STR && [anIdentifier isEqual:[[NSUUID alloc] initWithUUIDString:to_ns(uuid)]])
 		{
-			_identifier     = anIdentifier;
-			_backupPath     = to_ns(path);
-
-			_path           = to_ns(path::resolve(path::get_attr(path, "com.macromates.backup.path")));
-			_onDisk         = access([_path fileSystemRepresentation], F_OK) == 0;
-			_fileType       = to_ns(path::get_attr(path, "com.macromates.backup.file-type"));
-			_diskEncoding   = to_ns(path::get_attr(path, "com.macromates.backup.encoding"));
-			_diskNewlines   = to_ns(path::get_attr(path, "com.macromates.backup.newlines"));
-			_customName     = to_ns(path::get_attr(path, "com.macromates.backup.custom-name"));
-			_untitledCount  = atoi(path::get_attr(path, "com.macromates.backup.untitled-count").c_str());
-
-			if(path::get_attr(path, "com.macromates.backup.modified") == "YES")
-				_savedRevision = _revision-1;
-
-			return self;
+			if(OakDocument* res = [[OakDocument alloc] initWithBackupPath:to_ns(path)])
+			{
+				[OakDocumentController.sharedInstance register:res];
+				return res;
+			}
 		}
 	}
 	return nil;
 }
 
-+ (instancetype)documentWithPath:(NSString*)aPath
-{
-	return [[OakDocument alloc] initWithPath:aPath];
-}
-
-+ (instancetype)documentWithData:(NSData*)someData fileType:(NSString*)aFileType customName:(NSString*)aName
-{
-	return [[OakDocument alloc] initWithData:someData fileType:aFileType customName:aName];
-}
-
-+ (instancetype)documentWithIdentifier:(NSUUID*)anIdentifier
-{
-	return [[OakDocument alloc] initWithIdentifier:anIdentifier];
-}
-
 - (void)dealloc
 {
+	[OakDocumentController.sharedInstance unregister:self];
+	self.observeSCMStatus = NO;
+	[self deleteBuffer];
 	[self removeBackup];
 }
 
 - (NSString*)sniffFileType
 {
-	io::bytes_ptr firstLine = _buffer ? std::make_shared<io::bytes_t>(_buffer->substr(_buffer->begin(0), std::min<size_t>(_buffer->eol(0), 2048))) : io::bytes_ptr();
+	io::bytes_ptr firstLine = _buffer ? std::make_shared<io::bytes_t>(_buffer->substr(_buffer->begin(0), std::min<size_t>(_buffer->size(), 2048))) : io::bytes_ptr();
 	return to_ns(file::type(to_s(_path), firstLine, to_s(_virtualPath)));
 }
 
@@ -410,11 +439,16 @@ private:
 {
 	if(_customName)
 		return _customName;
+
 	if(_path)
-		return [[NSFileManager defaultManager] displayNameAtPath:_path];
+	{
+		if(!_cachedDisplayName)
+			_cachedDisplayName = [[NSFileManager defaultManager] displayNameAtPath:_path];
+		return _cachedDisplayName;
+	}
 
 	if(self.untitledCount == 0)
-		DocumentContainer.set_untitled_count(self);
+		self.untitledCount = [OakDocumentController.sharedInstance firstAvailableUntitledCount];
 
 	return _untitledCount == 1 ? @"untitled" : [NSString stringWithFormat:@"untitled %lu", _untitledCount];
 }
@@ -457,20 +491,31 @@ private:
 		return;
 
 	_path = path;
+	_directory = nil;
+	_icon = nil;
+	_cachedDisplayName = nil;
 	self.customName = nil;
 
 	if(_observeFileSystem)
 	{
 		self.observeFileSystem = NO;
-		self.observeFileSystem = YES;
+		self.observeFileSystem = _path ? YES : NO;
 	}
 
-	if(self.isOpen)
+	if(_observeSCMStatus)
 	{
-		self.onDisk = access([_path fileSystemRepresentation], F_OK) == 0;
+		self.observeSCMStatus = NO;
+		self.observeSCMStatus = _path ? YES : NO;
+	}
+
+	if(self.isLoaded)
+	{
+		self.onDisk = _path && access([_path fileSystemRepresentation], F_OK) == 0;
 		if(NSString* fileType = [self sniffFileType])
 			self.fileType = fileType;
 	}
+
+	[OakDocumentController.sharedInstance update:self];
 }
 
 - (void)setFileType:(NSString*)newType
@@ -479,7 +524,7 @@ private:
 		return;
 
 	_fileType = newType;
-	if(self.isOpen)
+	if(self.isLoaded)
 	{
 		[self setBufferGrammarForCurrentFileType];
 		[self updateSpellingSettings:YES andIndentSettings:YES];
@@ -492,7 +537,7 @@ private:
 		[editor documentWillSave:self];
 
 	std::map<std::string, std::string> res = {
-		{ "com.macromates.bookmarks",      to_s([self stringifyMarksOfType:to_ns(document::kBookmarkIdentifier)]) },
+		{ "com.macromates.bookmarks",      to_s([self stringifyMarksOfType:OakDocumentBookmarkIdentifier]) },
 		{ "com.macromates.selectionRange", to_s(_selection) },
 		{ "com.macromates.visibleIndex",   _visibleIndex ? to_s(_visibleIndex) : NULL_STR },
 		{ "com.macromates.crc32",          NULL_STR },
@@ -518,13 +563,21 @@ private:
 // = Backup =
 // ==========
 
-- (void)scheduleBackup
+- (void)bufferDidChange
 {
-	if(_keepBackupFile)
-	{
-		[_backupTimer invalidate];
-		_backupTimer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(backupTimerDidFire:) userInfo:nil repeats:NO];
-	}
+	static NSTimeInterval const kDocumentBackupDelay = 2;
+
+	[_backupTimer invalidate];
+	_backupTimer = _keepBackupFile ? [NSTimer scheduledTimerWithTimeInterval:kDocumentBackupDelay target:self selector:@selector(backupTimerDidFire:) userInfo:nil repeats:NO] : nil;
+
+	[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentContentDidChangeNotification object:self];
+}
+
+- (void)setKeepBackupFile:(BOOL)flag
+{
+	_keepBackupFile = flag;
+	if(!flag)
+		[self removeBackup];
 }
 
 - (void)backupTimerDidFire:(NSTimer*)aTimer
@@ -535,6 +588,9 @@ private:
 
 - (void)removeBackup
 {
+	[_backupTimer invalidate];
+	_backupTimer = nil;
+
 	if(_backupPath)
 	{
 		[[NSFileManager defaultManager] removeItemAtPath:_backupPath error:nullptr];
@@ -583,7 +639,7 @@ private:
 		auto attr = [self extendedAttributeds];
 
 		attr["com.macromates.backup.path"]           = to_s(_path);
-		attr["com.macromates.backup.identifier"]     = to_s(_identifier.UUIDString);
+		attr["com.macromates.backup.identifier"]     = to_s(_identifier);
 		attr["com.macromates.backup.file-type"]      = to_s(_fileType);
 		attr["com.macromates.backup.encoding"]       = to_s(_diskEncoding);
 		attr["com.macromates.backup.newlines"]       = to_s(_diskNewlines);
@@ -615,7 +671,7 @@ private:
 
 - (void)updateRecentDocumentMenu
 {
-	if(_recentTrackingDisabled || !_path || _virtualPath)
+	if(_recentTrackingDisabled || !self.isOnDisk || _virtualPath)
 		return;
 
 	NSURL* url = [NSURL fileURLWithPath:_path];
@@ -624,6 +680,9 @@ private:
 		[[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:url];
 	});
 }
+
+- (void)open   { ++self.openCount; }
+- (BOOL)isOpen { return self.openCount != 0; }
 
 - (BOOL)isLoading
 {
@@ -634,30 +693,20 @@ private:
 {
 	block = block ?: ^(OakDocumentIOResult, NSString*, oak::uuid_t const&){ };
 
-	if(++self.openCount != 1)
+	[self open];
+	if(self.isLoaded)
 	{
-		if(!_loadCompletionHandlers)
-				block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
-		else	_loadCompletionHandlers = [_loadCompletionHandlers arrayByAddingObject:block];
+		block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
+		return;
+	}
+	else if(self.isLoading)
+	{
+		_loadCompletionHandlers = [_loadCompletionHandlers arrayByAddingObject:block];
 		return;
 	}
 
-	if(_backupPath)
-	{
-		ASSERT(!_buffer);
-
-		BOOL isModified = self.isDocumentEdited;
-		std::string const path = to_s(_backupPath);
-		[self didLoadContent:std::make_shared<io::bytes_t>(path::content(path)) attributes:path::attributes(path) encoding:encoding::type(to_s(_diskNewlines), to_s(_diskEncoding))];
-
-		if(isModified)
-		{
-			_snapshot.reset();
-			self.savedRevision = _revision-1;
-		}
-
+	if([self tryLoadBackup])
 		return block(OakDocumentIOResultSuccess, nil, oak::uuid_t());
-	}
 
 	struct callback_t : file::open_callback_t
 	{
@@ -750,7 +799,7 @@ private:
 {
 	if(!content) // Loading failed
 	{
-		--self.openCount;
+		[self close];
 		return;
 	}
 
@@ -795,6 +844,7 @@ private:
 	self.revision       = _buffer->revision();
 	self.diskEncoding   = to_ns(encoding.charset());
 	self.diskNewlines   = to_ns(encoding.newlines());
+	self.loaded         = YES;
 
 	[self snapshot];
 	[self updateRecentDocumentMenu];
@@ -805,41 +855,12 @@ private:
 // = Save Document =
 // =================
 
-- (void)didSaveAtPath:(NSString*)aPath withEncoding:(encoding::type)encoding success:(BOOL)success
-{
-	if(success)
-	{
-		self.onDisk        = YES;
-		self.diskEncoding  = to_ns(encoding.charset());
-		self.diskNewlines  = to_ns(encoding.newlines());
-		self.savedRevision = _revision;
-
-		[self snapshot];
-		[self removeBackup];
-		[self updateRecentDocumentMenu];
-
-		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentDidSaveNotification object:self];
-	}
-	self.observeFileSystem = self.isOpen;
-}
-
 - (void)saveModalForWindow:(NSWindow*)aWindow completionHandler:(void(^)(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID))block
 {
-	if(!self.isOpen && self.isDocumentEdited && _backupPath)
+	if(self.isDocumentEdited && [self tryLoadBackup])
 	{
-		[self loadModalForWindow:aWindow completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
-			if(result == OakDocumentIOResultSuccess)
-			{
-				[self saveModalForWindow:aWindow completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
-					block(result, errorMessage, filterUUID);
-					[self close];
-				}];
-			}
-			else
-			{
-				NSString* errorMessage = [NSString stringWithFormat:@"Cannot save ‘%@’: Failed to restore backup ‘%@’.", self.displayName, [_backupPath stringByAbbreviatingWithTildeInPath]];
-				block(OakDocumentIOResultFailure, errorMessage, oak::uuid_t());
-			}
+		[self saveModalForWindow:aWindow completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+			block(result, errorMessage, filterUUID);
 		}];
 		return;
 	}
@@ -847,18 +868,19 @@ private:
 	if(_buffer)
 	{
 		self.observeFileSystem = NO;
-
-		std::map<std::string, std::string> attributes;
-		if(volume::settings(to_s(_path)).extended_attributes())
-			attributes = [self extendedAttributeds];
+		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillSaveNotification object:self];
 
 		encoding::type encoding = encoding::type(to_s(_diskNewlines), to_s(_diskEncoding));
 
-		settings_t const settings = settings_for_path(to_s(_path), to_s(_fileType), to_s(_directory ?: [_path stringByDeletingLastPathComponent]));
+		settings_t const settings = settings_for_path(to_s(_path), to_s(_fileType), to_s([_path stringByDeletingLastPathComponent] ?: _directory));
 		if(encoding.charset() == kCharsetNoEncoding)
 			encoding.set_charset(settings.get(kSettingsEncodingKey, kCharsetUTF8));
 		if(encoding.newlines() == NULL_STR)
 			encoding.set_newlines(settings.get(kSettingsLineEndingsKey, kLF));
+
+		std::map<std::string, std::string> attributes;
+		if(!settings.get(kSettingsDisableExtendedAttributesKey, false))
+			attributes = [self extendedAttributeds];
 
 		struct callback_t : file::save_callback_t
 		{
@@ -871,7 +893,7 @@ private:
 				if(!_window)
 					return;
 
-				[OakSavePanel showWithPath:[_document displayNameWithExtension:YES] directory:_document.directory fowWindow:_window encoding:encoding::type(to_s(_document.diskNewlines), to_s(_document.diskEncoding)) completionHandler:^(NSString* path, encoding::type const& encoding){
+				[OakSavePanel showWithPath:[_document displayNameWithExtension:YES] directory:_document.directory fowWindow:_window encoding:encoding::type(to_s(_document.diskNewlines), to_s(_document.diskEncoding)) fileType:_document.fileType completionHandler:^(NSString* path, encoding::type const& encoding){
 					if(path)
 					{
 						_document.path         = path;
@@ -960,20 +982,34 @@ private:
 			void(^_block)(OakDocumentIOResult result, NSString* path, encoding::type const& encoding, NSString* errorMessage, oak::uuid_t const& filterUUID);
 		};
 
-		BOOL closeDocument = self.isOpen;
-		if(closeDocument)
-			++self.openCount;
+		[self open];
 
 		auto cb = std::make_shared<callback_t>(self, aWindow, ^(OakDocumentIOResult result, NSString* path, encoding::type const& encoding, NSString* errorMessage, oak::uuid_t const& filterUUID){
-			if(closeDocument)
-				[self didSaveAtPath:path withEncoding:encoding success:result == OakDocumentIOResultSuccess];
+			if(result == OakDocumentIOResultSuccess)
+			{
+				[OakDocumentController.sharedInstance update:self];
+
+				// After performReplacements: we have a buffer but isLoaded == NO
+				if(self.isLoaded)
+				{
+					self.onDisk        = self.path ? YES : NO;
+					self.diskEncoding  = to_ns(encoding.charset());
+					self.diskNewlines  = to_ns(encoding.newlines());
+
+					[self markDocumentSaved];
+					[self removeBackup];
+					[self updateRecentDocumentMenu];
+
+					[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentDidSaveNotification object:self];
+				}
+			}
+			self.observeFileSystem = self.isLoaded;
+
 			if(block)
 				block(result, errorMessage, filterUUID);
-			if(closeDocument)
-				[self close];
-		});
 
-		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentWillSaveNotification object:self];
+			[self close];
+		});
 
 		io::bytes_ptr content = std::make_shared<io::bytes_t>(_buffer->size());
 		_buffer->visit_data([&](char const* bytes, size_t offset, size_t len, bool*){
@@ -1001,16 +1037,20 @@ private:
 	if(_path && _buffer)
 	{
 		document::marks.copy_from_buffer(to_s(_path), *_buffer);
-		if(_onDisk && !self.isDocumentEdited && volume::settings(to_s(_path)).extended_attributes())
-			path::set_attributes(to_s(_path), [self extendedAttributeds]);
+		if(_onDisk && !self.isDocumentEdited)
+		{
+			settings_t const settings = settings_for_path(to_s(_path), to_s(_fileType), to_s([_path stringByDeletingLastPathComponent] ?: _directory));
+			if(!settings.get(kSettingsDisableExtendedAttributesKey, false))
+				path::set_attributes(to_s(_path), [self extendedAttributeds]);
+		}
 	}
 
 	self.observeFileSystem = NO;
 	self.revision = _savedRevision; // Clears isDocumentEdited
 	[self removeBackup];
 
-	_undoManager.reset();
 	[self deleteBuffer];
+	self.loaded = NO;
 }
 
 // ==========================
@@ -1036,7 +1076,8 @@ private:
 		void did_replace (size_t from, size_t to, char const* buf, size_t len)
 		{
 			_size += len - (to - from);
-			_self.bufferEmpty = _size == 0;
+			if(_self.bufferEmpty != (_size == 0))
+				_self.bufferEmpty = _size == 0;
 
 			if(_should_sniff_file_type)
 			{
@@ -1045,7 +1086,7 @@ private:
 					_self.fileType = to_ns(newFileType);
 			}
 
-			[_self scheduleBackup];
+			[_self bufferDidChange];
 		}
 
 	private:
@@ -1055,7 +1096,7 @@ private:
 		}
 
 		size_t _size = 0;
-		OakDocument* _self;
+		__weak OakDocument* _self;
 
 		bool _should_sniff_file_type;
 		std::string _file_type;
@@ -1069,6 +1110,7 @@ private:
 
 - (void)deleteBuffer
 {
+	_undoManager.reset();
 	if(!_buffer)
 		return;
 
@@ -1078,9 +1120,33 @@ private:
 	_snapshot.reset();
 }
 
-- (BOOL)isOpen                                        { return _openCount != 0; }
-- (BOOL)isDocumentEdited                              { return _revision != _savedRevision && (_onDisk || !_bufferEmpty); }
-- (BOOL)shouldSniffFileType                           { return settings_for_path(to_s(_virtualPath ?: _path), scope::scope_t(), to_s(_directory ?: [_path stringByDeletingLastPathComponent])).get(kSettingsFileTypeKey, NULL_STR) == NULL_STR; }
+- (NSImage*)icon
+{
+	// Ideally we would nil the icon in setModified: or setOnDisk: but we don’t implement these
+	if(_icon && (_icon.isModified != self.isDocumentEdited || _icon.exists != self.isOnDisk))
+		_icon = nil;
+
+	if(!_icon)
+	{
+		self.observeSCMStatus = YES;
+
+		_icon = [[OakFileIconImage alloc] initWithSize:NSMakeSize(16, 16)];
+		_icon.path      = _virtualPath ?: _path;
+		_icon.scmStatus = _scmStatus;
+		_icon.modified  = self.isDocumentEdited;
+		_icon.exists    = self.isOnDisk;
+	}
+	return _icon;
+}
+
+- (void)markDocumentSaved
+{
+	self.savedRevision = _revision;
+	[self snapshot];
+}
+
+- (BOOL)isDocumentEdited                              { return _revision != _savedRevision && (_onDisk || !(_loaded && _bufferEmpty)); }
+- (BOOL)shouldSniffFileType                           { return settings_for_path(to_s(_virtualPath ?: _path), scope::scope_t(), to_s([_path stringByDeletingLastPathComponent] ?: _directory)).get(kSettingsFileTypeKey, NULL_STR) == NULL_STR; }
 
 - (BOOL)canUndo                                       { return _undoManager && _undoManager->can_undo(); }
 - (BOOL)canRedo                                       { return _undoManager && _undoManager->can_redo(); }
@@ -1101,7 +1167,12 @@ private:
 	if(OakDocumentEditor* editor = self.documentEditors.firstObject)
 			_undoManager->end_undo_group(editor.selection);
 	else	_undoManager->end_undo_group(ng::convert(*_buffer, to_s(_selection)));
-	self.revision = _buffer->revision();
+
+	if(_revision != _buffer->revision())
+		self.revision = _buffer->revision();
+
+	if(self.needsImportDocumentChanges && !_undoManager->in_undo_group())
+		[self importDocumentChanges:self];
 }
 
 - (void)undo
@@ -1131,6 +1202,12 @@ private:
 
 - (ng::buffer_t&)buffer                               { ASSERT(_buffer); return *_buffer; }
 - (ng::undo_manager_t&)undoManager                    { ASSERT(_undoManager); return *_undoManager; }
+
+- (void)setSelection:(NSString*)newSelection
+{
+	_selection    = newSelection;
+	_visibleIndex = ng::index_t();
+}
 
 - (NSArray<BundleGrammar*>*)proposedGrammars
 {
@@ -1166,7 +1243,7 @@ private:
 
 - (void)enumerateSymbolsUsingBlock:(void(^)(text::pos_t const& pos, NSString* symbol))block
 {
-	if(self.isOpen && _buffer)
+	if(self.isLoaded && _buffer)
 	{
 		_buffer->wait_for_repair();
 		for(auto const& pair : _buffer->symbols())
@@ -1174,21 +1251,50 @@ private:
 	}
 }
 
+- (void)enumerateBookmarksUsingBlock:(void(^)(text::pos_t const& pos, NSString* excerpt))block
+{
+	if(self.isLoaded && _buffer)
+	{
+		for(auto const& pair : _buffer->get_marks(0, _buffer->size(), to_s(OakDocumentBookmarkIdentifier)))
+		{
+			text::pos_t pos = _buffer->convert(pair.first);
+			block(pos, to_ns(_buffer->substr(_buffer->begin(pos.line), _buffer->eol(pos.line))));
+		}
+	}
+}
+
+- (void)enumerateBookmarksAtLine:(NSUInteger)line block:(void(^)(text::pos_t const& pos, NSString* type, NSString* payload))block
+{
+	if(self.isLoaded && _buffer)
+	{
+		for(auto const& pair : _buffer->get_marks(_buffer->begin(line), _buffer->eol(line)))
+			block(_buffer->convert(pair.first), to_ns(pair.second.first), to_ns(pair.second.second));
+	}
+}
+
 - (void)enumerateByteRangesUsingBlock:(void(^)(char const* bytes, NSRange byteRange, BOOL* stop))block
 {
-	BOOL stop = NO;
-	if(_buffer)
+	if(_buffer || (_backupPath && !self.isLoaded))
 	{
-		_buffer->visit_data([&](char const* bytes, size_t offset, size_t len, bool* tmp){
-			block(bytes, NSMakeRange(offset, len), &stop);
-			*tmp = stop;
-		});
+		auto handler = ^{
+			[self tryLoadBackup];
+			_buffer->visit_data([block](char const* bytes, size_t offset, size_t len, bool* tmp){
+				BOOL stop = NO;
+				block(bytes, NSMakeRange(offset, len), &stop);
+				*tmp = stop;
+			});
+		};
+
+		if([NSThread isMainThread])
+				handler();
+		else	dispatch_sync(dispatch_get_main_queue(), handler);
 	}
 	else if(_path)
 	{
 		file::reader_t reader(to_s(_path));
 		io::bytes_ptr bytes;
 		size_t offset = 0;
+		BOOL stop = NO;
 		while(!stop && (bytes = reader.next()))
 		{
 			block(bytes->get(), NSMakeRange(offset, bytes->size()), &stop);
@@ -1199,6 +1305,7 @@ private:
 
 - (NSString*)content
 {
+	[self tryLoadBackup];
 	if(!_buffer)
 		return nil;
 
@@ -1215,13 +1322,139 @@ private:
 	{
 		[self createBuffer];
 		_buffer->replace(0, _buffer->size(), to_s(newContent));
-		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentContentDidChangeNotification object:self];
 	}
 	else if(_buffer)
 	{
-		ASSERT_EQ(_openCount, 0);
+		ASSERT(_loaded == false);
 		[self deleteBuffer];
 	}
+}
+
+// ======================
+// = Search in Document =
+// ======================
+
+- (NSArray<OakDocumentMatch*>*)matchesForString:(NSString*)searchString options:(find::options_t)options
+{
+	return [self matchesForString:searchString options:options bufferSize:nullptr];
+}
+
+- (NSArray<OakDocumentMatch*>*)matchesForString:(NSString*)searchString options:(find::options_t)options bufferSize:(NSUInteger*)bufferSize
+{
+	struct range_match_t
+	{
+		range_match_t (ssize_t from, ssize_t to, std::map<std::string, std::string> const& captures) : from(from), to(to), captures(captures) { }
+
+		ssize_t from, to;
+		std::map<std::string, std::string> captures;
+	};
+
+	__block find::find_t f(to_s(searchString), options | (self.isLoaded == NO && (options & find::regular_expression) ? find::filesize_limit : find::none));
+	__block std::vector<range_match_t> ranges;
+	__block boost::crc_32_type crc32;
+	__block size_t total = 0;
+	[self enumerateByteRangesUsingBlock:^(char const* bytes, NSRange byteRange, BOOL* stop){
+		if(memchr(bytes, '\0', byteRange.length)) // searchBinaryFiles == NO
+		{
+			*stop = YES;
+			return;
+		}
+
+		for(ssize_t offset = 0; offset < byteRange.length; )
+		{
+			std::map<std::string, std::string> captures;
+			std::pair<ssize_t, ssize_t> const& m = f.match(bytes + offset, byteRange.length - offset, &captures);
+			if(m.first <= m.second)
+				ranges.emplace_back(byteRange.location + offset + m.first, byteRange.location + offset + m.second, captures);
+			ASSERT_NE(m.second, 0); ASSERT_LE(m.second, byteRange.length - offset);
+			offset += m.second;
+		}
+
+		crc32.process_bytes(bytes, byteRange.length);
+		total = NSMaxRange(byteRange);
+	}];
+
+	if(bufferSize)
+		*bufferSize = total;
+
+	std::map<std::string, std::string> captures;
+	std::pair<ssize_t, ssize_t> m = f.match(nullptr, 0, &captures);
+	while(m.first <= m.second)
+	{
+		ranges.emplace_back(total + m.first, total + m.second, captures);
+		captures.clear();
+		m = f.match(nullptr, 0, &captures);
+	}
+
+	if(ranges.empty())
+		return nil;
+
+	__block std::string text;
+	[self enumerateByteRangesUsingBlock:^(char const* bytes, NSRange byteRange, BOOL* stop){
+		text.insert(text.end(), bytes, bytes + byteRange.length);
+	}];
+
+	// Document has changed, should probably re-scan
+	boost::crc_32_type doubleCheck;
+	doubleCheck.process_bytes(text.data(), text.size());
+	if(crc32.checksum() != doubleCheck.checksum())
+		return nil;
+
+	std::string const crlf = text::estimate_line_endings(std::begin(text), std::end(text));
+
+	size_t bol = 0, crlfCount = 0;
+	size_t eol = text.find(crlf, bol);
+
+	NSMutableArray<OakDocumentMatch*>* results = [NSMutableArray array];
+	for(auto const& range : ranges)
+	{
+		while(eol != std::string::npos && eol + crlf.size() <= range.from)
+		{
+			bol = eol + crlf.size();
+			eol = text.find(crlf, bol);
+			++crlfCount;
+		}
+
+		text::pos_t from(crlfCount, range.from - bol);
+		size_t fromOffset = bol;
+
+		while(eol != std::string::npos && eol + crlf.size() <= range.to)
+		{
+			bol = eol + crlf.size();
+			eol = text.find(crlf, bol);
+			++crlfCount;
+		}
+
+		text::pos_t to(crlfCount, range.to - bol);
+		size_t toOffset = bol == range.to ? bol : (eol != std::string::npos ? (range.to <= eol ? eol : eol + crlf.size()) : text.size());
+
+		size_t orgFromOffset = fromOffset;
+		if(range.from - fromOffset > 200)
+			fromOffset = utf8::find_safe_end(text.begin(), text.begin() + range.from - ((range.from - fromOffset) % 150)) - text.begin();
+
+		size_t orgToOffset = toOffset;
+		if(toOffset - fromOffset > 500)
+			toOffset = utf8::find_safe_end(text.begin(), text.begin() + std::max<size_t>(fromOffset + 500, range.to)) - text.begin();
+
+		ASSERT_LE(fromOffset, range.from);
+		ASSERT_LE(range.to, toOffset);
+
+		OakDocumentMatch* match = [OakDocumentMatch new];
+		match.document      = self;
+		match.checksum      = crc32.checksum();
+		match.first         = range.from;
+		match.last          = range.to;
+		match.captures      = range.captures;
+		match.range         = text::range_t(from, to);
+		match.excerpt       = to_ns(text.substr(fromOffset, toOffset - fromOffset));
+		match.excerptOffset = fromOffset;
+		match.newlines      = to_ns(crlf);
+		match.headTruncated = orgFromOffset < fromOffset;
+		match.tailTruncated = toOffset < orgToOffset;
+		[results addObject:match];
+	}
+
+	return results;
 }
 
 // =========
@@ -1232,12 +1465,12 @@ private:
 {
 	if(_buffer)
 	{
-		_buffer->set_mark(_buffer->convert(aPos), to_s(aMark), to_s(value));
+		_buffer->set_mark(_buffer->convert(aPos), to_s(aMark), to_s(value ?: @""));
 		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentMarksDidChangeNotification object:self];
 	}
 	else if(_path)
 	{
-		document::marks.add(to_s(_path), aPos, to_s(aMark), to_s(value));
+		document::marks.add(to_s(_path), aPos, to_s(aMark), to_s(value ?: @""));
 	}
 }
 
@@ -1272,7 +1505,8 @@ private:
 
 + (void)removeAllMarksOfType:(NSString*)aMark
 {
-	DocumentContainer.remove_all_marks(aMark);
+	for(OakDocument* document in [OakDocumentController.sharedInstance documents])
+		[document removeAllMarksOfType:aMark];
 	document::marks.remove_all(to_s(aMark));
 }
 
@@ -1323,6 +1557,57 @@ private:
 	return [documentEditor handleOutput:string placement:place format:format caret:caret inputRanges:ranges environment:environment];
 }
 
+// ============
+// = SCM Info =
+// ============
+
+- (void)setObserveSCMStatus:(BOOL)flag
+{
+	if(_observeSCMStatus == flag)
+		return;
+	_observeSCMStatus = flag;
+
+	if(flag)
+	{
+		if(_scmInfo = scm::info(path::parent(to_s(self.path))))
+		{
+			_scmStatus    = _scmInfo->status(to_s(self.path));
+			_scmVariables = _scmInfo->scm_variables();
+
+			// We must postpone potential self.scmStatus = «status» when our callstack
+			// is bind:toObject:withKeyPath:options: → scmStatus → setObserveSCMStatus:
+			dispatch_async(dispatch_get_main_queue(), ^{
+				if(_scmInfo)
+				{
+					__weak OakDocument* weakSelf = self;
+					_scmInfo->push_callback(^(scm::info_t const& info){
+						weakSelf.scmStatus    = info.status(to_s(weakSelf.path));
+						weakSelf.scmVariables = info.scm_variables();
+					});
+				}
+			});
+		}
+	}
+	else
+	{
+		_scmInfo.reset();
+	}
+}
+
+- (scm::status::type)scmStatus
+{
+	self.observeSCMStatus = YES;
+	return _scmStatus;
+}
+
+- (void)setScmStatus:(scm::status::type)newStatus
+{
+	if(_scmStatus == newStatus)
+		return;
+	_scmStatus = newStatus;
+	_icon = nil;
+}
+
 // =======================
 // = Observe File System =
 // =======================
@@ -1362,12 +1647,14 @@ private:
 	}
 	else if((flags & NOTE_DELETE) == NOTE_DELETE)
 	{
-		self.onDisk = access([_path fileSystemRepresentation], F_OK) == 0;
+		self.onDisk = _path && access([_path fileSystemRepresentation], F_OK) == 0;
+		[OakDocumentController.sharedInstance update:self];
 	}
 	else if((flags & NOTE_WRITE) == NOTE_WRITE || (flags & NOTE_CREATE) == NOTE_CREATE)
 	{
-		self.onDisk = access([_path fileSystemRepresentation], F_OK) == 0;
+		self.onDisk = _path && access([_path fileSystemRepresentation], F_OK) == 0;
 		self.needsImportDocumentChanges = YES;
+		[OakDocumentController.sharedInstance update:self];
 	}
 }
 
@@ -1378,6 +1665,9 @@ private:
 
 	if(_needsImportDocumentChanges = flag)
 	{
+		if(_undoManager->in_undo_group())
+			return;
+
 		if(NSApp.isActive)
 		{
 			[self importDocumentChanges:self];
@@ -1386,7 +1676,7 @@ private:
 		{
 			__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidBecomeActiveNotification object:NSApp queue:nil usingBlock:^(NSNotification*){
 				[[NSNotificationCenter defaultCenter] removeObserver:observerId];
-				if(self.isOpen)
+				if(self.isLoaded)
 					[self importDocumentChanges:self];
 			}];
 		}
@@ -1441,7 +1731,7 @@ private:
 
 		void show_content (std::string const& path, io::bytes_ptr content, std::map<std::string, std::string> const& attributes, encoding::type const& encoding, std::vector<oak::uuid_t> const& binaryImportFilters, std::vector<oak::uuid_t> const& textImportFilters)
 		{
-			if(!_self.isOpen)
+			if(!_self.isLoaded)
 				return;
 
 			ng::buffer_t& buffer = [_self buffer];
@@ -1451,7 +1741,7 @@ private:
 
 			if(yours == mine)
 			{
-				_self.savedRevision = _self.revision;
+				[_self markDocumentSaved];
 			}
 			else if(!_self.isDocumentEdited)
 			{
@@ -1460,10 +1750,8 @@ private:
 				buffer.replace(0, buffer.size(), yours);
 				[_self endUndoGrouping];
 
-				_self.savedRevision = _self.revision;
-				[_self snapshot];
+				[_self markDocumentSaved];
 				[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentDidReloadNotification object:_self];
-				[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentContentDidChangeNotification object:_self];
 			}
 			else if(_self->_snapshot)
 			{
@@ -1482,7 +1770,6 @@ private:
 
 					_self.savedRevision = merged == yours ? _self.revision : -1;
 					[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentDidReloadNotification object:_self];
-					[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentContentDidChangeNotification object:_self];
 				}
 			}
 			else
@@ -1513,9 +1800,10 @@ private:
 
 - (BOOL)performReplacements:(std::multimap<std::pair<size_t, size_t>, std::string> const&)someReplacements checksum:(uint32_t)crc32
 {
-	if(self.isOpen)
+	[self tryLoadBackup];
+	if(self.isLoaded)
 	{
-		OakDocumentEditor* documentEditor = self.documentEditors.firstObject ?: [OakDocumentEditor documentEditorWithDocument:self fontScaleFactor:100];
+		OakDocumentEditor* documentEditor = self.documentEditors.firstObject ?: [OakDocumentEditor documentEditorWithDocument:self fontScaleFactor:1];
 		[documentEditor performReplacements:someReplacements];
 		return YES;
 	}

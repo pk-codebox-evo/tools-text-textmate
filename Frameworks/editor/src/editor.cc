@@ -463,7 +463,7 @@ namespace ng
 
 		std::string const& indent = options["indent"];
 		bool const complete       = options["complete"] == "1";
-		size_t const fragments    = strtol(options["fragments"].c_str(), NULL, 10);
+		size_t const fragments    = strtol(options["fragments"].c_str(), nullptr, 10);
 		bool const columnar       = options["columnar"] == "1";
 
 		if((selections.size() != 1 || selections.last().columnar) && (fragments > 1 || oak::contains(str.begin(), str.end(), '\n')))
@@ -760,7 +760,7 @@ namespace ng
 		_selections = this->snippet(from, to, str, variables, disableIndent);
 	}
 
-	void editor_t::perform (action_t action, layout_t const* layout, indent_correction_t indentCorrections, std::string const& scopeAttributes)
+	void editor_t::perform (action_t action, layout_movement_t const* layout, indent_correction_t indentCorrections, std::string const& scopeAttributes)
 	{
 		static std::string const kSingleMarkType = "•";
 		preserve_selection_helper_t selectionHelper(_buffer, _selections);
@@ -1324,7 +1324,7 @@ namespace ng
 		_selections = this->replace(replacements, true);
 	}
 
-	bool editor_t::handle_result (std::string const& uncheckedOut, output::type placement, output_format::type format, output_caret::type outputCaret, ng::ranges_t const& inputRanges, std::map<std::string, std::string> environment)
+	bool editor_t::handle_result (std::string const& uncheckedOut, output::type placement, output_format::type format, output_caret::type outputCaret, ng::ranges_t const& inputRanges, std::map<std::string, std::string> const& environment)
 	{
 		std::string const& out = utf8::is_valid(uncheckedOut.begin(), uncheckedOut.end()) ? uncheckedOut : sanitized_utf8(uncheckedOut);
 		ng::range_t inputRange = inputRanges ? inputRanges.last() : ng::range_t();

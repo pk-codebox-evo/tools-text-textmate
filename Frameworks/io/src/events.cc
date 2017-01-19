@@ -81,7 +81,7 @@ namespace
 				std::string devPath = path::relative_to(_observed.path(), devInfo.mount_point);
 				D(DBF_FS_Events, bug("watch ‘%s’ / ‘%s’ (device %x, event 0x%llx)\n", devInfo.mount_point.c_str(), devPath.c_str(), devInfo.device, _event_id););
 
-				FSEventStreamContext contextInfo = { 0, this, NULL, NULL, NULL };
+				FSEventStreamContext contextInfo = { 0, this, nullptr, nullptr, nullptr };
 				if(!(_stream = FSEventStreamCreateRelativeToDevice(kCFAllocatorDefault, &events_t::callback, &contextInfo, devInfo.device, cf::wrap(std::vector<std::string>(1, devPath)), eventId, latency, kFSEventStreamCreateFlagNone)))
 					fprintf(stderr, "can’t observe ‘%s’\n", path.c_str());
 
@@ -157,7 +157,7 @@ namespace
 
 		static void callback (ConstFSEventStreamRef streamRef, void* clientCallBackInfo, size_t numEvents, void* eventPaths, FSEventStreamEventFlags const eventFlags[], FSEventStreamEventId const eventIds[])
 		{
-			stream_t& stream = *(stream_t*)clientCallBackInfo;
+			stream_t& stream = *static_cast<stream_t*>(clientCallBackInfo);
 			D(DBF_FS_Events, bug("%zu events\n", numEvents););
 
 			uint64_t lastEventId = 0;
@@ -175,14 +175,15 @@ namespace
 				{
 					if(!stream._requested.exists()) // check if it has been created
 					{
-						if(path.find(path::parent(requestedPath)) == 0)
+						std::string const parentPath = path::parent(requestedPath);
+						if(path.compare(0, parentPath.size(), parentPath) == 0)
 						{
 							stream._requested = file_info_t(requestedPath);
 							if(stream._requested.exists())
 							{
 								if(!stream._requested.is_directory())
 									stream._callback->did_change(requestedPath, requestedPath, eventIds[i], eventFlags[i] & kFSEventStreamEventFlagMustScanSubDirs);
-								else if(path.find(requestedPath) == 0)
+								else if(path.compare(0, requestedPath.size(), requestedPath) == 0)
 									stream._callback->did_change(path, requestedPath, eventIds[i], eventFlags[i] & kFSEventStreamEventFlagMustScanSubDirs);
 							}
 						}
@@ -207,7 +208,7 @@ namespace
 							// fprintf(stderr, "skipping %s (watching %s, requested %s)\n", path.c_str(), stream._observed.path().c_str(), requestedPath.c_str());
 						}
 					}
-					else if(path.find(requestedPath) == 0) // make sure the event is in our observed directory
+					else if(path.compare(0, requestedPath.size(), requestedPath) == 0) // make sure the event is in our observed directory
 					{
 						stream._callback->did_change(path, requestedPath, eventIds[i], eventFlags[i] & kFSEventStreamEventFlagMustScanSubDirs);
 					}

@@ -6,7 +6,7 @@
 #include <oak/callbacks.h>
 #include <regexp/find.h>
 #include <command/parser.h>
-#include <layout/layout.h>
+#include <selection/selection.h>
 
 namespace ng
 {
@@ -169,7 +169,7 @@ namespace ng
 		editor_delegate_t* delegate () const            { return _delegate; }
 		void set_delegate (editor_delegate_t* delegate) { _delegate = delegate; }
 
-		void perform (action_t action, layout_t const* layout = NULL, indent_correction_t indentCorrections = kIndentCorrectAlways, std::string const& scopeAttributes = NULL_STR);
+		void perform (action_t action, layout_movement_t const* layout = NULL, indent_correction_t indentCorrections = kIndentCorrectAlways, std::string const& scopeAttributes = NULL_STR);
 
 		bool disallow_tab_expansion () const;
 
@@ -199,7 +199,7 @@ namespace ng
 		void sanitize_selection ();
 
 		void perform_replacements (std::multimap<std::pair<size_t, size_t>, std::string> const& replacements);
-		bool handle_result (std::string const& out, output::type placement, output_format::type format, output_caret::type outputCaret, ng::ranges_t const& inputRanges, std::map<std::string, std::string> environment);
+		bool handle_result (std::string const& out, output::type placement, output_format::type format, output_caret::type outputCaret, ng::ranges_t const& inputRanges, std::map<std::string, std::string> const& environment);
 
 		void clear_snippets ();
 

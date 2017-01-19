@@ -19,6 +19,7 @@
 #import <OakAppKit/OakOpenWithMenu.h>
 #import <OakAppKit/OakUIConstructionFunctions.h>
 #import <OakAppKit/OakZoomingIcon.h>
+#import <OakAppKit/NSMenuItem Additions.h>
 #import <OakSystem/application.h>
 #import <OakCommand/OakCommand.h>
 #import <bundles/bundles.h>
@@ -802,7 +803,7 @@ static bool is_binary (std::string const& path)
 		// TODO For commands that have ‘input = document’ we should provide the document
 		OakCommand* command = [[OakCommand alloc] initWithBundleCommand:parse_command(item)];
 		command.firstResponder = self;
-		[command executeWithInput:nil variables:item->bundle_variables() completionHandler:nil];
+		[command executeWithInput:nil variables:item->bundle_variables() outputHandler:nil];
 	}
 }
 
@@ -1022,6 +1023,7 @@ static bool is_binary (std::string const& path)
 - (void)openItems:(NSArray*)items animate:(BOOL)animateFlag
 {
 	NSMutableArray* urlsToOpen     = [NSMutableArray array];
+	NSMutableArray* urlsToShow     = [NSMutableArray array];
 	NSMutableArray* itemsToAnimate = [NSMutableArray array];
 
 	for(FSItem* item in items)
@@ -1045,7 +1047,7 @@ static bool is_binary (std::string const& path)
 		{
 			case FSItemURLTypeFolder:
 			case FSItemURLTypeUnknown:
-				return [self goToURL:itemURL];
+				[urlsToShow addObject:itemURL];
 			break;
 
 			case FSItemURLTypePackage:
@@ -1059,6 +1061,9 @@ static bool is_binary (std::string const& path)
 			break;
 		}
 	}
+
+	if(itemsToAnimate.count == 0 && urlsToShow.count > 0)
+		return [self goToURL:urlsToShow.firstObject];
 
 	if(animateFlag && ![[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsFileBrowserOpenAnimationDisabled])
 	{
@@ -1282,7 +1287,7 @@ static bool is_binary (std::string const& path)
 					default: items = [NSString stringWithFormat:@" %ld Items", selectedFiles]; break;
 				}
 			}
-			[item setTitle:[NSString stringWithFormat:info.format, items]];
+			[item setDynamicTitle:[NSString stringWithFormat:info.format, items]];
 		}
 	}
 

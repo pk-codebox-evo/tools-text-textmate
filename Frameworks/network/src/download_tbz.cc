@@ -56,7 +56,7 @@ namespace network
 
 		static size_t receive_header (void* ptr, size_t size, size_t nmemb, void* udata)
 		{
-			user_data_t& data = *((user_data_t*)udata);
+			user_data_t& data = *static_cast<user_data_t*>(udata);
 
 			char const* bytes = (char const*)ptr;
 			size_t len = nmemb * size;
@@ -86,7 +86,7 @@ namespace network
 					if(header == "etag")
 						data.etag = value;
 					else if(header == "content-length")
-						data.total = strtol(value.c_str(), NULL, 10);
+						data.total = strtol(value.c_str(), nullptr, 10);
 					else if(header == kHTTPSigneeHeader || header == kHTTPSignatureHeader)
 						data.verify_signature.receive_header(header, value);
 				}
@@ -96,7 +96,7 @@ namespace network
 
 		static size_t receive_data (void* ptr, size_t size, size_t nmemb, void* udata)
 		{
-			user_data_t& data = *((user_data_t*)udata);
+			user_data_t& data = *static_cast<user_data_t*>(udata);
 
 			write(data.tbz_fd, ptr, size * nmemb);
 			write(data.tmp_fd, ptr, size * nmemb);
@@ -139,7 +139,7 @@ namespace network
 			curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION,   &receive_header);
 			curl_easy_setopt(handle, CURLOPT_HEADERDATA,       &data);
 
-			struct curl_slist* headers = NULL;
+			struct curl_slist* headers = nullptr;
 			std::string const etag = path::get_attr(destination, kHTTPEntityTagAttribute);
 			if(etag != NULL_STR)
 			{

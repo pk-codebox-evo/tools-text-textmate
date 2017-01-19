@@ -9,7 +9,6 @@
 
 OAK_DEBUG_VAR(PlugInController);
 
-static TMPlugInController* SharedInstance;
 static NSInteger const kPlugInAPIVersion = 2;
 static NSString* const kUserDefaultsDisabledPlugInsKey = @"disabledPlugIns";
 
@@ -29,9 +28,10 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 }
 
 @implementation TMPlugInController
-+ (TMPlugInController*)sharedInstance
++ (instancetype)sharedInstance
 {
-	return SharedInstance ?: [TMPlugInController new];
+	static TMPlugInController* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 + (void)initialize
@@ -43,15 +43,12 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 
 - (id)init
 {
-	if(SharedInstance)
-	{
-	}
-	else if(self = SharedInstance = [super init])
+	if(self = [super init])
 	{
 		D(DBF_PlugInController, bug("\n"););
 		self.loadedPlugIns = [NSMutableDictionary dictionary];
 	}
-	return SharedInstance;
+	return self;
 }
 
 - (CGFloat)version
@@ -66,7 +63,7 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 		NSString* identifier = [bundle objectForInfoDictionaryKey:@"CFBundleIdentifier"];
 		NSString* name = [bundle objectForInfoDictionaryKey:@"CFBundleName"];
 
-		NSArray* blacklist = [[NSUserDefaults standardUserDefaults] arrayForKey:kUserDefaultsDisabledPlugInsKey];
+		NSArray* blacklist = [[NSUserDefaults standardUserDefaults] stringArrayForKey:kUserDefaultsDisabledPlugInsKey];
 		if([blacklist containsObject:identifier])
 			return;
 
@@ -93,7 +90,7 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 
 				if([bundle load])
 				{
-					crash_reporter_info_t crashInfo("bad plug-in: " + to_s(identifier));
+					crash_reporter_info_t info("bad plug-in: %s", [identifier UTF8String]);
 					if(id instance = CreateInstanceOfPlugInClass([bundle principalClass], self))
 					{
 						self.loadedPlugIns[identifier] = instance;
@@ -162,7 +159,7 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 		return;
 	}
 
-	NSArray* blacklist = [[NSUserDefaults standardUserDefaults] arrayForKey:kUserDefaultsDisabledPlugInsKey];
+	NSArray* blacklist = [[NSUserDefaults standardUserDefaults] stringArrayForKey:kUserDefaultsDisabledPlugInsKey];
 	if([blacklist containsObject:[plugInBundle objectForInfoDictionaryKey:@"CFBundleIdentifier"]])
 	{
 		NSRunAlertPanel(@"Cannot Install Plug-in", @"The %@ plug-in should not be used with this version of TextMate because of stability problems.", @"Continue", nil, nil, plugInName);
@@ -171,7 +168,7 @@ static id CreateInstanceOfPlugInClass (Class cl, TMPlugInController* controller)
 
 	if([fm fileExistsAtPath:dst])
 	{
-		NSString* newVersion = [[NSBundle bundleWithPath:src] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: [[NSBundle bundleWithPath:src] objectForInfoDictionaryKey:@"CFBundleVersion"];
+		NSString* newVersion = [plugInBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: [plugInBundle objectForInfoDictionaryKey:@"CFBundleVersion"];
 		NSString* oldVersion = [[NSBundle bundleWithPath:dst] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: [[NSBundle bundleWithPath:dst] objectForInfoDictionaryKey:@"CFBundleVersion"];
 		NSInteger choice = NSRunAlertPanel(@"Plug-in Already Installed", @"Version %@ of “%@” is already installed.\nDo you want to replace it with version %@?\n\nUpgrading a plug-in will require TextMate to be relaunched.", @"Replace", @"Cancel", nil, oldVersion ?: @"???", plugInName, newVersion ?: @"???");
 		if(choice == NSAlertDefaultReturn) // "Replace"

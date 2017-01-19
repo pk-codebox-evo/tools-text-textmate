@@ -12,7 +12,7 @@ namespace bundles
 	// = Shell Command Requirements =
 	// ==============================
 
-	required_command_t::required_command_t (std::string const& command, std::string moreInfoUrl, std::string const& variable, std::vector<std::string> const& locations) : command(command), more_info_url(moreInfoUrl), variable(variable), locations(locations)
+	required_command_t::required_command_t (std::string const& command, std::string const& moreInfoUrl, std::string const& variable, std::vector<std::string> const& locations) : command(command), more_info_url(moreInfoUrl), variable(variable), locations(locations)
 	{
 	}
 
@@ -237,31 +237,17 @@ namespace bundles
 	std::vector<item_ptr> drag_commands_for_path (std::string const& path, scope::context_t const& scope)
 	{
 		std::string ext = text::lowercase(path);
-		while(ext != "")
+		while(!ext.empty())
 		{
 			std::vector<item_ptr> const& res = query(kFieldDropExtension, ext, scope, kItemTypeDragCommand);
 			if(!res.empty())
 				return res;
 
 			ext = path::extensions(ext);
-			if(ext.find('.') == 0)
+			if(!ext.empty() && ext.front() == '.')
 				ext = ext.substr(1);
 		}
 		return query(kFieldDropExtension, "*", scope, kItemTypeDragCommand);
-	}
-
-	std::vector<item_ptr> grammars_for_path (std::string const& path)
-	{
-		std::multimap<ssize_t, item_ptr> ordering;
-		for(auto const& item : query(kFieldAny, NULL_STR, scope::wildcard, kItemTypeGrammar))
-		{
-			for(auto const& ext : item->values_for_field(kFieldGrammarExtension))
-			{
-				if(ssize_t rank = path::rank(path, ext))
-					ordering.emplace(rank, item);
-			}
-		}
-		return ordering.empty() ? std::vector<item_ptr>() : std::vector<item_ptr>(1, ordering.begin()->second);
 	}
 
 } /* bundles */

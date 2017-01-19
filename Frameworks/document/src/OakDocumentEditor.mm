@@ -12,8 +12,10 @@ static int32_t const NSWrapColumnWindowWidth = 0;
 
 @interface OakDocumentEditor ()
 {
+	NSInteger _changeGroupLevel;
 	std::unique_ptr<ng::editor_t> _editor;
 	std::unique_ptr<ng::layout_t> _layout;
+	std::unique_ptr<ng::callback_t> _buffer_callback;
 }
 @property (nonatomic, readwrite) OakDocument* document;
 @end
@@ -23,16 +25,16 @@ static int32_t const NSWrapColumnWindowWidth = 0;
 // ====================================
 
 @implementation OakDocumentEditor
-+ (instancetype)documentEditorWithDocument:(OakDocument*)aDocument fontScaleFactor:(NSInteger)scale
++ (instancetype)documentEditorWithDocument:(OakDocument*)aDocument fontScaleFactor:(CGFloat)scale
 {
 	return [[OakDocumentEditor alloc] initWithDocument:aDocument fontScaleFactor:scale];
 }
 
-- (instancetype)initWithDocument:(OakDocument*)aDocument fontScaleFactor:(NSInteger)scale
+- (instancetype)initWithDocument:(OakDocument*)aDocument fontScaleFactor:(CGFloat)scale
 {
 	if(self = [self init])
 	{
-		ASSERT(aDocument.isOpen);
+		ASSERT(aDocument.isLoaded);
 
 		// TODO Get from somewhere else (settings?)
 		bool scrollPastEnd = false;
@@ -57,7 +59,7 @@ static int32_t const NSWrapColumnWindowWidth = 0;
 		size_t wrapColumn = settings.get(kSettingsWrapColumnKey, NSWrapColumnWindowWidth);
 
 		theme_ptr theme = parse_theme(bundles::lookup(settings.get(kSettingsThemeKey, NULL_STR)));
-		_layout = std::make_unique<ng::layout_t>([_document buffer], theme, to_s(_font.fontName), _font.pointSize * _fontScaleFactor / 100, softWrap, scrollPastEnd, wrapColumn, to_s(_document.folded));
+		_layout = std::make_unique<ng::layout_t>([_document buffer], theme, to_s(_font.fontName), _font.pointSize * _fontScaleFactor, softWrap, scrollPastEnd, wrapColumn, to_s(_document.folded));
 
 		if(settings.get(kSettingsShowWrapColumnKey, false))
 			_layout->set_draw_wrap_column(true);
@@ -66,35 +68,74 @@ static int32_t const NSWrapColumnWindowWidth = 0;
 			_layout->set_draw_indent_guides(true);
 
 		[_document registerDocumentEditor:self];
-		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentContentDidChange:) name:OakDocumentContentDidChangeNotification object:_document];
+
+		struct callback_t : ng::callback_t
+		{
+			callback_t (OakDocumentEditor* self) : _self(self) { }
+
+			void did_replace (size_t from, size_t to, char const* buf, size_t len)
+			{
+				[_self didChangeBuffer];
+			}
+
+		private:
+			__weak OakDocumentEditor* _self;
+		};
+
+		_buffer_callback = std::make_unique<callback_t>(self);
+		self.buffer.add_callback(_buffer_callback.get());
 	}
 	return self;
 }
 
 - (void)dealloc
 {
-	[[NSNotificationCenter defaultCenter] removeObserver:self name:OakDocumentContentDidChangeNotification object:_document];
+	if(_changeGroupLevel != 0)
+		[_document endUndoGrouping];
+
 	[self documentWillSave:_document];
+	if(_document && _buffer_callback)
+		self.buffer.remove_callback(_buffer_callback.get());
 	_layout.reset();
 	_editor.reset();
 	[_document close];
 	[_document unregisterDocumentEditor:self];
 }
 
+- (void)didChangeBuffer
+{
+	if(_changeGroupLevel == 0)
+		_editor->sanitize_selection();
+}
+
 - (ng::buffer_t&)buffer { return [_document buffer]; }
 - (ng::editor_t&)editor { return *_editor; }
 - (ng::layout_t&)layout { return *_layout; }
 
+- (BOOL)beginChangeGrouping
+{
+	if(++_changeGroupLevel == 1)
+		[_document beginUndoGrouping];
+	return _changeGroupLevel == 1;
+}
+
+- (BOOL)endChangeGrouping
+{
+	if(--_changeGroupLevel == 0)
+		[_document endUndoGrouping];
+	return _changeGroupLevel == 0;
+}
+
 - (void)setFont:(NSFont*)newFont
 {
 	_font = newFont;
-	_layout->set_font(to_s(_font.fontName), _font.pointSize * _fontScaleFactor / 100);
+	_layout->set_font(to_s(_font.fontName), _font.pointSize * _fontScaleFactor);
 }
 
-- (void)setFontScaleFactor:(NSInteger)scale
+- (void)setFontScaleFactor:(CGFloat)scale
 {
 	_fontScaleFactor = scale;
-	_layout->set_font(to_s(_font.fontName), _font.pointSize * _fontScaleFactor / 100);
+	_layout->set_font(to_s(_font.fontName), _font.pointSize * _fontScaleFactor);
 }
 
 - (ng::ranges_t)selection
@@ -122,13 +163,11 @@ static int32_t const NSWrapColumnWindowWidth = 0;
 		to.offset   = range.last.carry;
 		ranges.push_back(text::range_t(from, to, range.columnar));
 	}
-	aDocument.selection = to_ns(ranges);
-	aDocument.folded = to_ns(_layout->folded_as_string());
-}
 
-- (void)documentContentDidChange:(NSNotification*)aNotification
-{
-	_editor->sanitize_selection();
+	ng::index_t visibleIndex = aDocument.visibleIndex;
+	aDocument.selection    = to_ns(ranges); // This resets visibleIndex
+	aDocument.visibleIndex = visibleIndex;
+	aDocument.folded       = to_ns(_layout->folded_as_string());
 }
 
 - (void)performReplacements:(std::multimap<std::pair<size_t, size_t>, std::string> const&)someReplacements

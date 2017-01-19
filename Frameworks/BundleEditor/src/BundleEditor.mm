@@ -10,10 +10,13 @@
 #import <OakAppKit/OakSound.h>
 #import <OakAppKit/OakFileIconImage.h>
 #import <OakTextView/OakDocumentView.h>
+#import <document/OakDocument.h>
+#import <document/OakDocumentController.h>
 #import <BundlesManager/BundlesManager.h>
 #import <command/runner.h> // fix_shebang
 #import <plist/ascii.h>
 #import <plist/delta.h>
+#import <regexp/format_string.h>
 #import <text/decode.h>
 #import <cf/cf.h>
 #import <ns/ns.h>
@@ -23,11 +26,22 @@
 
 OAK_DEBUG_VAR(BundleEditor);
 
-static BundleEditor* SharedInstance;
-
 @class OakCommand;
 
 @interface BundleEditor () <OakTextViewDelegate>
+{
+	IBOutlet NSBrowser* browser;
+	IBOutlet OakDocumentView* documentView;
+	NSDrawer* drawer;
+
+	be::entry_ptr bundles;
+	std::map<bundles::item_ptr, plist::dictionary_t> changes;
+
+	BOOL propertiesChanged;
+
+	bundles::item_ptr bundleItem;
+	OakDocument* bundleItemContent;
+}
 - (void)didChangeBundleItems;
 - (void)didChangeModifiedState;
 @property (nonatomic) PropertiesViewController* sharedPropertiesViewController;
@@ -125,17 +139,15 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 }
 
 @implementation BundleEditor
-+ (BundleEditor*)sharedInstance
++ (instancetype)sharedInstance
 {
-	return SharedInstance ?: [self new];
+	static BundleEditor* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 - (id)init
 {
-	if(SharedInstance)
-	{
-	}
-	else if(self = SharedInstance = [super initWithWindowNibName:@"BundleEditor"])
+	if(self = [super initWithWindowNibName:@"BundleEditor"])
 	{
 		D(DBF_BundleEditor, bug("\n"););
 
@@ -149,35 +161,8 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 
 		static callback_t cb(self);
 		bundles::add_callback(&cb);
-
-		struct document_callback_t : document::document_t::callback_t
-		{
-			document_callback_t (BundleEditor* self) : _self(self) { }
-
-			void handle_document_event (document::document_ptr document, event_t event)
-			{
-				switch(event)
-				{
-					case did_change_modified_status:
-						[_self didChangeModifiedState];
-					break;
-				}
-			}
-
-		private:
-			BundleEditor* _self;
-		};
-
-		documentCallback = new document_callback_t(self);
 	}
-	return SharedInstance;
-}
-
-- (void)dealloc
-{
-	if(bundleItemContent)
-		bundleItemContent->remove_callback(documentCallback);
-	delete documentCallback;
+	return self;
 }
 
 - (void)windowDidLoad
@@ -248,7 +233,7 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 
 - (void)didChangeModifiedState
 {
-	[self setDocumentEdited:bundleItem && (changes.find(bundleItem) != changes.end() || propertiesChanged || (bundleItemContent && bundleItemContent->is_modified()))];
+	[self setDocumentEdited:bundleItem && (changes.find(bundleItem) != changes.end() || propertiesChanged || bundleItemContent.isDocumentEdited)];
 }
 
 // ==================
@@ -399,12 +384,12 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 	[_sharedPropertiesViewController commitEditing];
 	[_extraPropertiesViewController commitEditing];
 
-	if(!propertiesChanged && !bundleItemContent->is_modified())
+	if(!propertiesChanged && bundleItemContent.isDocumentEdited == NO)
 		return YES;
 
 	plist::dictionary_t plist = plist::convert((__bridge CFPropertyListRef)_bundleItemProperties);
 
-	std::string const& content = bundleItemContent->content();
+	std::string const content = to_s(bundleItemContent.content);
 	item_info_t const& info = info_for(bundleItem->kind());
 
 	plist::any_t parsedContent;
@@ -461,7 +446,7 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 	else	changes[bundleItem] = plist;
 
 	propertiesChanged = NO;
-	bundleItemContent->set_disk_revision(bundleItemContent->revision());
+	[bundleItemContent markDocumentSaved];
 
 	[self didChangeModifiedState];
 	return YES;
@@ -568,6 +553,10 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 				NSMenuItem* submenuItem = [menu addItemWithTitle:@"Show in Finder" action:nil keyEquivalent:@""];
 				submenuItem.submenu = submenu;
 			}
+
+			NSMenuItem* menuItem = [menu addItemWithTitle:@"Copy UUID" action:@selector(copyUUID:) keyEquivalent:@""];
+			menuItem.target = self;
+			menuItem.representedObject = [NSString stringWithCxxString:item->uuid()];
 		}
 		else
 		{
@@ -588,6 +577,12 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 	item.target = self;
 	item.representedObject = [NSString stringWithCxxString:path];
 	return item;
+}
+
+- (void)copyUUID:(NSMenuItem*)sender
+{
+	[[NSPasteboard generalPasteboard] declareTypes:@[ NSStringPboardType ] owner:nil];
+	[[NSPasteboard generalPasteboard] setString:[sender representedObject] forType:NSStringPboardType];
 }
 
 - (void)exportBundle:(id)sender
@@ -659,7 +654,8 @@ static be::entry_ptr parent_for_column (NSBrowser* aBrowser, NSInteger aColumn, 
 
 - (void)observeValueForKeyPath:(NSString*)aKeyPath ofObject:(id)anObject change:(NSDictionary*)someChange context:(void*)context
 {
-	propertiesChanged = YES;
+	if(![aKeyPath isEqualToString:@"documentEdited"])
+		propertiesChanged = YES;
 	[self didChangeModifiedState];
 }
 
@@ -743,8 +739,30 @@ static NSMutableDictionary* DictionaryForPropertyList (plist::dictionary_t const
 	return bundleItem;
 }
 
-- (BOOL)window:(NSWindow*)aWindow shouldDragDocumentWithEvent:(NSEvent*)anEvent from:(NSPoint)dragImageLocation withPasteboard:(NSPasteboard*)aPasteboard { return NO; }
-- (BOOL)window:(NSWindow*)aWindow shouldPopUpDocumentPathMenu:(NSMenu*)aMenu                                                                              { return NO; }
+- (BOOL)window:(NSWindow*)aWindow shouldDragDocumentWithEvent:(NSEvent*)anEvent from:(NSPoint)dragImageLocation withPasteboard:(NSPasteboard*)aPasteboard
+{
+	return bundleItem && bundleItem->paths().size() == 1;
+}
+
+- (BOOL)window:(NSWindow*)aWindow shouldPopUpDocumentPathMenu:(NSMenu*)menu
+{
+	if(!bundleItem)
+		return NO;
+
+	auto const& paths = bundleItem->paths();
+	if(paths.size() == 1)
+		return YES;
+
+	[menu removeAllItems];
+	for(std::string const& path : paths)
+	{
+		NSMenuItem* item = [self createMenuItemForCxxPath:path];
+		item.title = [[NSString stringWithCxxString:path] stringByAbbreviatingWithTildeInPath];
+		item.state = NSOffState;
+		[menu addItem:item];
+	}
+	return YES;
+}
 
 - (void)setBundleItem:(bundles::item_ptr const&)aBundleItem
 {
@@ -754,10 +772,10 @@ static NSMutableDictionary* DictionaryForPropertyList (plist::dictionary_t const
 	[self commitEditing];
 
 	if(bundleItemContent)
-		bundleItemContent->remove_callback(documentCallback);
+		[bundleItemContent removeObserver:self forKeyPath:@"documentEdited"];
 
 	bundleItem        = aBundleItem;
-	bundleItemContent = document::document_ptr();
+	bundleItemContent = nil;
 
 	std::map<bundles::item_ptr, plist::dictionary_t>::const_iterator it = changes.find(bundleItem);
 	self.bundleItemProperties = it != changes.end() ? DictionaryForPropertyList(it->second, bundleItem) : DictionaryForBundleItem(bundleItem);
@@ -765,8 +783,18 @@ static NSMutableDictionary* DictionaryForPropertyList (plist::dictionary_t const
 	item_info_t const& info = info_for(bundleItem->kind());
 
 	[[self window] setTitle:[NSString stringWithCxxString:bundleItem->name_with_bundle()]];
-	[[self window] setRepresentedFilename:NSHomeDirectory()];
-	[[[self window] standardWindowButton:NSWindowDocumentIconButton] setImage:[[NSWorkspace sharedWorkspace] iconForFileType:[NSString stringWithCxxString:info.file_type]]];
+	NSString* bundleItemTitle = [NSString stringWithCxxString:bundleItem->name()];
+
+	auto const& paths = bundleItem->paths();
+	if(paths.size() == 1)
+	{
+		self.window.representedURL = [NSURL fileURLWithPath:[NSString stringWithCxxString:paths.front()]];
+	}
+	else
+	{
+		self.window.representedFilename = NSHomeDirectory();
+		[self.window standardWindowButton:NSWindowDocumentIconButton].image = [[NSWorkspace sharedWorkspace] iconForFileType:[NSString stringWithCxxString:info.file_type]];
+	}
 
 	plist::dictionary_t const& plist = it != changes.end() ? it->second : bundleItem->plist();
 	if(info.plist_key == NULL_STR)
@@ -783,12 +811,12 @@ static NSMutableDictionary* DictionaryForPropertyList (plist::dictionary_t const
 			if(plist.find(key) != plist.end())
 				plistSubset[key] = plist.find(key)->second;
 		}
-		bundleItemContent = document::from_content(to_s(plistSubset, plist::kPreferSingleQuotedStrings, PlistKeySortOrder()), info.grammar);
+		bundleItemContent = [OakDocument documentWithString:to_ns(to_s(plistSubset, plist::kPreferSingleQuotedStrings, PlistKeySortOrder())) fileType:to_ns(info.grammar) customName:bundleItemTitle];
 	}
 	else if(oak::contains(std::begin(PlistItemKinds), std::end(PlistItemKinds), info.kind))
 	{
 		if(plist.find(info.plist_key) != plist.end())
-			bundleItemContent = document::from_content(to_s(plist.find(info.plist_key)->second, plist::kPreferSingleQuotedStrings, PlistKeySortOrder()), info.grammar);
+			bundleItemContent = [OakDocument documentWithString:to_ns(to_s(plist.find(info.plist_key)->second, plist::kPreferSingleQuotedStrings, PlistKeySortOrder())) fileType:to_ns(info.grammar) customName:bundleItemTitle];
 	}
 	else
 	{
@@ -797,14 +825,13 @@ static NSMutableDictionary* DictionaryForPropertyList (plist::dictionary_t const
 		{
 			if(info.kind == bundles::kItemTypeCommand || info.kind == bundles::kItemTypeDragCommand)
 				command::fix_shebang(&str);
-			bundleItemContent = document::from_content(str, info.grammar);
+			bundleItemContent = [OakDocument documentWithString:to_ns(str) fileType:to_ns(info.grammar) customName:bundleItemTitle];
 		}
 	}
 
-	bundleItemContent = bundleItemContent ?: document::from_content("");
-	bundleItemContent->set_custom_name(bundleItem->name());
-	bundleItemContent->add_callback(documentCallback);
-	[documentView setDocument:bundleItemContent];
+	bundleItemContent = bundleItemContent ?: [OakDocument documentWithString:@"" fileType:nil customName:bundleItemTitle];
+	documentView.document = bundleItemContent;
+	[bundleItemContent addObserver:self forKeyPath:@"documentEdited" options:0 context:nullptr];
 
 	_sharedPropertiesViewController = [[PropertiesViewController alloc] initWithName:@"SharedProperties"];
 	_extraPropertiesViewController  = nil;

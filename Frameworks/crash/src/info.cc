@@ -1,6 +1,5 @@
 #include "info.h"
 #include <oak/debug.h>
-#include <oak/tls_ptr.h>
 
 /* CrashReporter info */
 char const* __crashreporter_info__ = nullptr;
@@ -59,14 +58,30 @@ namespace
 
 	static stack_t& stack ()
 	{
-		static oak::tls_ptr_t<stack_t> stackPtr;
-		return *stackPtr;
+		thread_local stack_t stack;
+		return stack;
 	}
 }
 
 crash_reporter_info_t::crash_reporter_info_t (std::string const& str)
 {
 	stack().push(str);
+}
+
+crash_reporter_info_t::crash_reporter_info_t (char const* format, ...)
+{
+	char* tmp = nullptr;
+
+	va_list ap;
+	va_start(ap, format);
+	vasprintf(&tmp, format, ap);
+	va_end(ap);
+
+	if(tmp)
+	{
+		stack().push(tmp);
+		free(tmp);
+	}
 }
 
 crash_reporter_info_t::~crash_reporter_info_t ()

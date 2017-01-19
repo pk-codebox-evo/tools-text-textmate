@@ -2,11 +2,81 @@ Title: Release Notes
 
 # Changes
 
-## 2016-08-30 (v2.0-beta.12.6)
+## 2016-12-03 (v2.0-rc.5)
 
+* Fix slowdown when editing files on high-latency file systems.
+* Don’t add non-existing files to Open Recent menu, as they will result in duplicates. *[Ronald Wampler]*
+* See [all changes since v2.0-rc.4](https://github.com/textmate/textmate/compare/v2.0-rc.4...v2.0-rc.5)
+
+## 2016-11-18 (v2.0-rc.4)
+
+* Fixes/improvements.
+* See [all changes since v2.0-rc.1](https://github.com/textmate/textmate/compare/v2.0-rc.1...v2.0-rc.4)
+
+## 2016-11-11 (v2.0-rc.1)
+
+* Removed beta from version string (and miscellaneous fixes/improvements).
+* See [all changes since v2.0-beta.12.26](https://github.com/textmate/textmate/compare/v2.0-beta.12.26...v2.0-rc.1)
+
+## 2016-10-23 (v2.0-beta.12.26)
+
+* TextMate’s bundle identifier has been changed to `com.macromates.TextMate` (previously it had a `preview` suffix). This is the same bundle identifier as TextMate 1.x so if you still have TextMate 1.x installed then we recommend to simply delete it.
+
+	The changed bundle identifier may cause a compatibility issue with third party software, particularly software that offers an “Open in TextMate 2”, there is unfortunately no nice solution to this problem other than request that the software is updated to use the new (old) bundle identifier.
+
+	The `mate` command line tool is among such software, but it should automatically update to version 2.11, if not, go to _Preferences → Terminal_ and select to Uninstall and then Install `mate` (the automatic updating of `mate` only works if TextMate can figure out where it was previously installed).
+
+* See [all changes since v2.0-beta.12.23](https://github.com/textmate/textmate/compare/v2.0-beta.12.23...v2.0-beta.12.26)
+
+## 2016-10-11 (v2.0-beta.12.23)
+
+* Bundles are no longer read from the Avian folder. You should have been prompted about moving them, if you had any. The reason we initially used the Avian folder was so that people could still use TextMate 1.x with bundles that did not rely on 2.0 features, so this move signals that we no longer think there is a reason to keep TextMate 1.x around. If you have a reason, please [let us know](https://macromates.com/support) (so that we can hopefully address it).
+* The `volumeSettings` user defaults key has been replaced with `disableExtendedAttributes` that can be set in `~/.tm_properties`. If you had disabled extended attributes for specific volumes, your settings should automatically appear in `~/Library/Application Support/TextMate/Global.tmProperties`.
+* See [all changes since v2.0-beta.12.21](https://github.com/textmate/textmate/compare/v2.0-beta.12.21...v2.0-beta.12.23)
+
+## 2016-10-03 (v2.0-beta.12.21)
+
+* Commands can be set to run again for certain events, for example both _HTML → Show Preview_ and _Markdown → Show Preview_ now update the preview on document changes. To enable this for a command you currently need to edit the property list for the `tmCommand` file and insert something like this:
+
+		<key>autoRefresh</key>
+		<array>
+			<string>DocumentChanged</string> <!-- Run whenever document is changed -->
+			<string>DocumentSaved</string>   <!-- Run if any document is saved     -->
+			<string>DocumentClosed</string>  <!-- Run when the document is closed  -->
+		</array>
+
+	When TextMate runs your command as a result of any of the above actions then the `TM_REFRESH` environment variable will be set to the event that triggered the execution.
+
+	If the command has HTML output then the HTML output view will be tied to the command/document, so closing the HTML output will stop running the command, and closing the document will cause the HTML output to also close (unless the command is only running on `DocumentSaved`, in this case, the HTML output will close when the window is closed, as the `DocumentSaved` event monitors saving of any document).
+
+	If the command does *not* have HTML output and its name matches `^(\w+) / (\w+) (.*)` then TextMate will show it as `$1 $3` by default and `$2 $3` when the command has been run, furthermore, if the user selects a command that has already been run, TextMate will stop running this command.
+
+	For example we could name our command “Enable / Disable Live Errors” and make it show a tool tip or gutter icon on each document change. The user will see it as “Enable Live Errors” unless it is already running, in which case it will be “Disable Live Errors”.
+
+* Format strings now support `${«var»:/titlecase}` as alias for `${«var»:/capitalize}`.
+* The find and replace text fields in the search dialog now have syntax highlight. By default they are using the Mac Classic theme but this can be changed using the `UIThemeUUID` defaults key. The grammars used for the fields are the _Regular Expressions (Oniguruma)_ and _Format String_ grammars from the TextMate bundle.
+* CoreText CTLine objects are now limited to about 2048 bytes of text which improve performance significantly for documents with extremely long lines but it may cause minor unicode incorrectness, mainly right-to-left text rendering would be affected, though officially right-to-left is still not fully supported by TextMate.
+* See [all changes since v2.0-beta.12.13](https://github.com/textmate/textmate/compare/v2.0-beta.12.13...v2.0-beta.12.21)
+
+## 2016-09-21 (v2.0-beta.12.13)
+
+* The search dialog now has a _“File Browser Items”_ in its pop-up. This refers to the selected items in the file browser, which can be files and folders (everything selected will be searched). If there is no selection, it will use the file browser’s location.
+* Speaking of file browser, searching _“Open Files”_ now also work after session restore (where previously non-loaded tabs would be skipped).
+* New `callback.document.did-change-scm-status` which is used by the SCM Gutter command to trigger after a commit/revert.
+* See [all changes since v2.0-beta.12.11](https://github.com/textmate/textmate/compare/v2.0-beta.12.11...v2.0-beta.12.13)
+
+## 2016-09-09 (v2.0-beta.12.11)
+
+* Minor tweaks and fixes incl. two recently introduced crash bugs.
+* See [all changes since v2.0-beta.12.8](https://github.com/textmate/textmate/compare/v2.0-beta.12.8...v2.0-beta.12.11)
+
+## 2016-08-30 (v2.0-beta.12.8)
+
+* The `callback.mouse-click` “semantic class” has been changed to `callback.single-click` and there is now also `callback.double-click` and `callback.triple-click`.
 * Add `callback.document.will/did-reload` which is triggered when the document is reloaded due to external changes. This is relevant for commands that update the gutter based on document content.
 * Add _Copy Replacements_ to the Find dialog’s action menu. After a regular expression search this can be used to copy all matches, but transformed by the replacement (format) string. For example search for `obj->(\w+)\(` and put `$1` in the _Replace_ field before selecting _Copy Replacements_ and you’ll get a list of just the member function name itself copied to the clipboard.
-* See [all changes since v2.0-beta.12.5](https://github.com/textmate/textmate/compare/v2.0-beta.12.5...v2.0-beta.12.6)
+
+* See [all changes since v2.0-beta.12.5](https://github.com/textmate/textmate/compare/v2.0-beta.12.5...v2.0-beta.12.8)
 
 ## 2016-08-25 (v2.0-beta.12.5)
 

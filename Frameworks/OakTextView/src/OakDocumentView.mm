@@ -1,7 +1,7 @@
 #import "OakDocumentView.h"
 #import "GutterView.h"
 #import "OTVStatusBar.h"
-#import <document/document.h>
+#import <document/OakDocument.h>
 #import <file/type.h>
 #import <text/ctype.h>
 #import <text/parse.h>
@@ -51,8 +51,6 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 	OakBackgroundFillView* statusDividerView;
 
 	NSScrollView* textScrollView;
-	document::document_ptr document;
-	document::document_t::callback_t* callback;
 
 	NSMutableArray* topAuxiliaryViews;
 	NSMutableArray* bottomAuxiliaryViews;
@@ -65,38 +63,12 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 - (void)updateStyle;
 @end
 
-struct document_view_callback_t : document::document_t::callback_t
-{
-	WATCH_LEAKS(document_view_callback_t);
-	document_view_callback_t (OakDocumentView* self) : self(self) { }
-	void handle_document_event (document::document_ptr document, event_t event)
-	{
-		if(event == did_change_marks)
-		{
-			[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
-		}
-		else if(event == did_change_file_type)
-		{
-			self.statusBar.fileType = [NSString stringWithCxxString:document->file_type()];
-		}
-		else if(event == did_change_indent_settings)
-		{
-			self.statusBar.tabSize  = document->indent().tab_size();
-			self.statusBar.softTabs = document->indent().soft_tabs();
-		}
-	}
-private:
-	__weak OakDocumentView* self;
-};
-
 @implementation OakDocumentView
 - (id)initWithFrame:(NSRect)aRect
 {
 	D(DBF_OakDocumentView, bug("%s\n", [NSStringFromRect(aRect) UTF8String]););
 	if(self = [super initWithFrame:aRect])
 	{
-		callback = new document_view_callback_t(self);
-
 		_textView = [[OakTextView alloc] initWithFrame:NSZeroRect];
 		_textView.autoresizingMask = NSViewWidthSizable|NSViewHeightSizable;
 
@@ -130,20 +102,13 @@ private:
 		OakAddAutoLayoutViewsToSuperview(@[ gutterScrollView, gutterDividerView, textScrollView, statusDividerView, _statusBar ], self);
 		OakSetupKeyViewLoop(@[ self, _textView, _statusBar ], NO);
 
-		document::document_ptr doc = document::from_content("", "text.plain"); // file type is only to avoid potential “no grammar” warnings in console
-		doc->set_custom_name("null document"); // without a name it grabs an ‘untitled’ token
-		[self setDocument:doc];
+		self.document = [OakDocument documentWithString:@"" fileType:@"text.plain" customName:@"placeholder"];
 
-		self.observedKeys = @[ @"selectionString", @"tabSize", @"softTabs", @"isMacroRecording"];
+		self.observedKeys = @[ @"selectionString", @"symbol", @"recordingMacro"];
 		for(NSString* keyPath in self.observedKeys)
 			[_textView addObserver:self forKeyPath:keyPath options:NSKeyValueObservingOptionInitial context:NULL];
 	}
 	return self;
-}
-
-+ (BOOL)requiresConstraintBasedLayout
-{
-	return YES;
 }
 
 - (void)updateConstraints
@@ -256,28 +221,28 @@ private:
 	NSString* lineNumberFontName = [[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsLineNumberFontNameKey] ?: [_textView.font fontName];
 
 	gutterImages = nil; // force image sizes to be recalculated
-	gutterView.lineNumberFont = [NSFont fontWithName:lineNumberFontName size:round(scaleFactor * [_textView.font pointSize] * _textView.fontScaleFactor / 100)];
+	gutterView.lineNumberFont = [NSFont fontWithName:lineNumberFontName size:round(scaleFactor * [_textView.font pointSize] * _textView.fontScaleFactor)];
 	[gutterView reloadData:self];
 }
 
 - (IBAction)makeTextLarger:(id)sender
 {
-	_textView.fontScaleFactor += 10;
+	_textView.fontScaleFactor += 0.1;
 	[self updateGutterViewFont:self];
 }
 
 - (IBAction)makeTextSmaller:(id)sender
 {
-	if(_textView.fontScaleFactor > 10)
+	if(_textView.fontScaleFactor > 0.1)
 	{
-		_textView.fontScaleFactor -= 10;
+		_textView.fontScaleFactor -= 0.1;
 		[self updateGutterViewFont:self];
 	}
 }
 
 - (IBAction)makeTextStandardSize:(id)sender
 {
-	_textView.fontScaleFactor = 100;
+	_textView.fontScaleFactor = 1;
 	[self updateGutterViewFont:self];
 }
 
@@ -296,101 +261,87 @@ private:
 
 - (void)observeValueForKeyPath:(NSString*)aKeyPath ofObject:(id)observableController change:(NSDictionary*)changeDictionary context:(void*)userData
 {
-	if(observableController != _textView || ![self.observedKeys containsObject:aKeyPath])
-		return;
-
 	if([aKeyPath isEqualToString:@"selectionString"])
 	{
 		NSString* str = [_textView valueForKey:@"selectionString"];
 		[gutterView setHighlightedRange:to_s(str ?: @"1")];
 		[_statusBar setSelectionString:str];
 		_symbolChooser.selectionString = str;
-
-		if(document)
-		{
-			ng::buffer_t const& buf = document->buffer();
-			text::selection_t sel(to_s(str));
-			size_t i = buf.convert(sel.last().max());
-			_statusBar.symbolName = [NSString stringWithCxxString:buf.symbol_at(i)];
-		}
+	}
+	else if([aKeyPath isEqualToString:@"symbol"])
+	{
+		_statusBar.symbolName = _textView.symbol;
+	}
+	else if([aKeyPath isEqualToString:@"recordingMacro"])
+	{
+		_statusBar.recordingMacro = _textView.isRecordingMacro;
+	}
+	else if([aKeyPath isEqualToString:@"fileType"])
+	{
+		_statusBar.fileType = self.document.fileType;
 	}
 	else if([aKeyPath isEqualToString:@"tabSize"])
 	{
-		_statusBar.tabSize = _textView.tabSize;
+		_statusBar.tabSize = self.document.tabSize;
 	}
 	else if([aKeyPath isEqualToString:@"softTabs"])
 	{
-		_statusBar.softTabs = _textView.softTabs;
-	}
-	else
-	{
-		[_statusBar setValue:[_textView valueForKey:aKeyPath] forKey:aKeyPath];
+		_statusBar.softTabs = self.document.softTabs;
 	}
 }
 
 - (void)dealloc
 {
-	gutterView.delegate    = nil;
-	_statusBar.delegate    = nil;
-
 	for(NSString* keyPath in self.observedKeys)
 		[_textView removeObserver:self forKeyPath:keyPath];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 
-	[self setDocument:document::document_ptr()];
-	delete callback;
-
+	self.document = nil;
 	self.symbolChooser = nil;
 }
 
-- (document::document_ptr const&)document
+- (void)setDocument:(OakDocument*)aDocument
 {
-	return document;
-}
+	NSArray* const documentKeys = @[ @"fileType", @"tabSize", @"softTabs" ];
 
-- (void)setDocument:(document::document_ptr const&)aDocument
-{
-	document::document_ptr oldDocument = document;
+	OakDocument* oldDocument = self.document;
 	if(oldDocument)
-		oldDocument->remove_callback(callback);
-
-	if(aDocument)
-		aDocument->sync_open();
-
-	if(document = aDocument)
 	{
-		document->add_callback(callback);
-		document->show();
-
-		_statusBar.fileType = [NSString stringWithCxxString:document->file_type()];
-		_statusBar.tabSize  = document->indent().tab_size();
-		_statusBar.softTabs = document->indent().soft_tabs();
+		for(NSString* key in documentKeys)
+			[oldDocument removeObserver:self forKeyPath:key];
+		[[NSNotificationCenter defaultCenter] removeObserver:self name:OakDocumentMarksDidChangeNotification object:oldDocument];
 	}
 
-	[_textView setDocument:document];
+	if(aDocument)
+		[aDocument loadModalForWindow:self.window completionHandler:nullptr];
+
+	if(_document = aDocument)
+	{
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(documentMarksDidChange:) name:OakDocumentMarksDidChangeNotification object:self.document];
+		for(NSString* key in documentKeys)
+			[self.document addObserver:self forKeyPath:key options:NSKeyValueObservingOptionInitial context:nullptr];
+	}
+
+	[_textView setDocument:self.document];
 	[gutterView reloadData:self];
 	[self updateStyle];
 
 	if(_symbolChooser)
 	{
-		_symbolChooser.document        = document->document();
+		_symbolChooser.document        = self.document;
 		_symbolChooser.selectionString = _textView.selectionString;
 	}
 
 	if(oldDocument)
-	{
-		oldDocument->hide();
-		oldDocument->close();
-	}
+		[oldDocument close];
 }
 
 - (void)updateStyle
 {
-	theme_ptr theme = _textView.theme;
-	if(theme && document)
+	if(theme_ptr theme = _textView.theme)
 	{
 		[[self window] setOpaque:!theme->is_transparent() && !theme->gutter_styles().is_transparent()];
-		[textScrollView setBackgroundColor:[NSColor colorWithCGColor:theme->background(document->file_type())]];
+		[textScrollView setBackgroundColor:[NSColor colorWithCGColor:theme->background(to_s(self.document.fileType))]];
 
 		if(theme->is_dark())
 		{
@@ -454,7 +405,7 @@ private:
 		}
 		else
 		{
-			[aMenuItem setTitle:[NSString stringWithFormat:@"Other (%zd)…", _textView.tabSize]];
+			[aMenuItem setDynamicTitle:[NSString stringWithFormat:@"Other (%zd)…", _textView.tabSize]];
 			[aMenuItem setState:NSOnState];
 		}
 	}
@@ -467,27 +418,9 @@ private:
 		NSString* uuidString = [aMenuItem representedObject];
 		if(bundles::item_ptr bundleItem = bundles::lookup(to_s(uuidString)))
 		{
-			bool selectedGrammar = document && document->file_type() == bundleItem->value_for_field(bundles::kFieldGrammarScope);
+			bool selectedGrammar = to_s(self.document.fileType) == bundleItem->value_for_field(bundles::kFieldGrammarScope);
 			[aMenuItem setState:selectedGrammar ? NSOnState : NSOffState];
 		}
-	}
-	else if([aMenuItem action] == @selector(toggleCurrentBookmark:))
-	{
-		text::selection_t sel(to_s(_textView.selectionString));
-		size_t lineNumber = sel.last().max().line;
-
-		ng::buffer_t const& buf = document->buffer();
-		[aMenuItem setTitle:buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier).empty() ? @"Set Bookmark" : @"Remove Bookmark"];
-	}
-	else if([aMenuItem action] == @selector(goToNextBookmark:) || [aMenuItem action] == @selector(goToPreviousBookmark:))
-	{
-		auto const& buf = document->buffer();
-		return buf.get_marks(0, buf.size(), document::kBookmarkIdentifier).empty() ? NO : YES;
-	}
-	else if([aMenuItem action] == @selector(jumpToNextMark:) || [aMenuItem action] == @selector(jumpToPreviousMark:))
-	{
-		auto const& buf = document->buffer();
-		return buf.get_marks(0, buf.size()).empty() ? NO : YES;
 	}
 	return YES;
 }
@@ -565,7 +498,7 @@ private:
 		_symbolChooser.target          = self;
 		_symbolChooser.action          = @selector(symbolChooserDidSelectItems:);
 		_symbolChooser.filterString    = @"";
-		_symbolChooser.document        = document->document();
+		_symbolChooser.document        = self.document;
 		_symbolChooser.selectionString = _textView.selectionString;
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(symbolChooserWillClose:) name:NSWindowWillCloseNotification object:_symbolChooser.window];
@@ -609,34 +542,30 @@ private:
 	NSMenu* symbolMenu = symbolPopUp.menu;
 	[symbolMenu removeAllItems];
 
-	ng::buffer_t const& buf = document->buffer();
 	text::selection_t sel(to_s(_textView.selectionString));
-	size_t i = buf.convert(sel.last().max());
+	text::pos_t caret = sel.last().max();
 
-	NSInteger index = 0;
-	for(auto pair : buf.symbols())
-	{
-		if(pair.second == "-")
+	__block NSInteger index = 0;
+	[self.document enumerateSymbolsUsingBlock:^(text::pos_t const& pos, NSString* symbol){
+		if([symbol isEqualToString:@"-"])
 		{
 			[symbolMenu addItem:[NSMenuItem separatorItem]];
 		}
 		else
 		{
-			std::string const emSpace = " ";
+			NSUInteger indent = 0;
+			while(indent < symbol.length && [symbol characterAtIndex:indent] == 0x2003) // Em-space
+				++indent;
 
-			std::string::size_type offset = 0;
-			while(pair.second.find(emSpace, offset) == offset)
-				offset += emSpace.size();
-
-			NSMenuItem* item = [symbolMenu addItemWithTitle:[NSString stringWithCxxString:pair.second.substr(offset)] action:@selector(goToSymbol:) keyEquivalent:@""];
-			[item setIndentationLevel:offset / emSpace.size()];
+			NSMenuItem* item = [symbolMenu addItemWithTitle:[symbol substringFromIndex:indent] action:@selector(goToSymbol:) keyEquivalent:@""];
+			[item setIndentationLevel:indent];
 			[item setTarget:self];
-			[item setRepresentedObject:[NSString stringWithCxxString:buf.convert(pair.first)]];
+			[item setRepresentedObject:to_ns(pos)];
 		}
 
-		if(pair.first <= i)
+		if(pos <= caret)
 			++index;
-	}
+	}];
 
 	if(symbolMenu.numberOfItems == 0)
 		[symbolMenu addItemWithTitle:@"No symbols to show for current document." action:@selector(nop:) keyEquivalent:@""];
@@ -665,7 +594,7 @@ private:
 	for(auto pair : ordered)
 	{
 		bool selectedGrammar = false;
-		for(auto item : bundles::query(bundles::kFieldGrammarScope, document->file_type(), scope::wildcard, bundles::kItemTypeGrammar, pair.second->uuid(), true, true))
+		for(auto item : bundles::query(bundles::kFieldGrammarScope, to_s(self.document.fileType), scope::wildcard, bundles::kItemTypeGrammar, pair.second->uuid(), true, true))
 			selectedGrammar = true;
 		if(!selectedGrammar && pair.second->hidden_from_user() || pair.second->menu().empty())
 			continue;
@@ -696,7 +625,7 @@ private:
 - (void)setTabSize:(NSUInteger)newTabSize
 {
 	_textView.tabSize = newTabSize;
-	settings_t::set(kSettingsTabSizeKey, (size_t)newTabSize, document->file_type());
+	settings_t::set(kSettingsTabSizeKey, (size_t)newTabSize, to_s(self.document.fileType));
 }
 
 - (IBAction)takeTabSizeFrom:(id)sender
@@ -711,14 +640,14 @@ private:
 {
 	D(DBF_OakDocumentView, bug("\n"););
 	_textView.softTabs = YES;
-	settings_t::set(kSettingsSoftTabsKey, true, document->file_type());
+	settings_t::set(kSettingsSoftTabsKey, true, to_s(self.document.fileType));
 }
 
 - (IBAction)setIndentWithTabs:(id)sender
 {
 	D(DBF_OakDocumentView, bug("\n"););
 	_textView.softTabs = NO;
-	settings_t::set(kSettingsSoftTabsKey, false, document->file_type());
+	settings_t::set(kSettingsSoftTabsKey, false, to_s(self.document.fileType));
 }
 
 - (IBAction)showTabSizeSelectorPanel:(id)sender
@@ -765,24 +694,22 @@ private:
 {
 	if([columnIdentifier isEqualToString:kBookmarksColumnIdentifier])
 	{
-		std::map<size_t, std::string> gutterImageName;
+		__block std::map<size_t, NSString*> gutterImageName;
 
-		ng::buffer_t const& buf = document->buffer();
-		for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber)))
-		{
-			if(!pair.second.second.empty())
-				gutterImageName.emplace(0, pair.second.first);
-			else if(pair.second.first == document::kBookmarkIdentifier)
-				gutterImageName.emplace(1, rowState != GutterViewRowStateRegular ? "Bookmark Hover Remove Template" : "Bookmark Template");
+		[self.document enumerateBookmarksAtLine:lineNumber block:^(text::pos_t const& pos, NSString* type, NSString* payload){
+			if(payload.length != 0)
+				gutterImageName.emplace(0, type);
+			else if([type isEqualToString:OakDocumentBookmarkIdentifier])
+				gutterImageName.emplace(1, rowState != GutterViewRowStateRegular ? @"Bookmark Hover Remove Template" : @"Bookmark Template");
 			else if(rowState == GutterViewRowStateRegular)
-				gutterImageName.emplace(2, pair.second.first);
-		}
+				gutterImageName.emplace(2, type);
+		}];
 
 		if(rowState != GutterViewRowStateRegular)
-			gutterImageName.emplace(3, "Bookmark Hover Add Template");
+			gutterImageName.emplace(3, @"Bookmark Hover Add Template");
 
 		if(!gutterImageName.empty())
-			return [self gutterImage:[NSString stringWithCxxString:gutterImageName.begin()->second]];
+			return [self gutterImage:gutterImageName.begin()->second];
 	}
 	else if([columnIdentifier isEqualToString:kFoldingsColumnIdentifier])
 	{
@@ -808,18 +735,16 @@ private:
 
 - (void)updateBookmarksMenu:(NSMenu*)aMenu
 {
-	ng::buffer_t& buf = document->buffer();
-	std::map<size_t, std::string> const& marks = buf.get_marks(0, buf.size(), document::kBookmarkIdentifier);
-	for(auto const& pair : marks)
-	{
-		size_t n = buf.convert(pair.first).line;
-		NSMenuItem* item = [aMenu addItemWithTitle:[NSString stringWithCxxString:text::pad(n+1, 4) + ": " + buf.substr(buf.begin(n), buf.eol(n))] action:@selector(takeBookmarkFrom:) keyEquivalent:@""];
-		[item setRepresentedObject:[NSString stringWithCxxString:buf.convert(pair.first)]];
-	}
+	[self.document enumerateBookmarksUsingBlock:^(text::pos_t const& pos, NSString* excerpt){
+		NSString* prefix = to_ns(text::pad(pos.line+1, 4) + ": ");
+		NSMenuItem* item = [aMenu addItemWithTitle:[prefix stringByAppendingString:excerpt] action:@selector(takeBookmarkFrom:) keyEquivalent:@""];
+		[item setRepresentedObject:to_ns(pos)];
+	}];
 
-	if(!marks.empty())
+	BOOL hasBookmarks = aMenu.numberOfItems;
+	if(hasBookmarks)
 		[aMenu addItem:[NSMenuItem separatorItem]];
-	[aMenu addItemWithTitle:@"Clear Bookmarks" action:marks.empty() ? NULL : @selector(clearAllBookmarks:) keyEquivalent:@""];
+	[aMenu addItemWithTitle:@"Clear Bookmarks" action:hasBookmarks ? @selector(clearAllBookmarks:) : @selector(nop:) keyEquivalent:@""];
 }
 
 // =======================
@@ -830,26 +755,27 @@ private:
 {
 	if([columnIdentifier isEqualToString:kBookmarksColumnIdentifier])
 	{
-		ng::buffer_t& buf = document->buffer();
+		__block std::vector<text::pos_t> bookmarks;
+		__block NSMutableArray* content = [NSMutableArray array];
 
-		std::vector<std::string> info;
-		for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber)))
-		{
-			if(!pair.second.second.empty())
-				info.push_back(pair.second.second);
-		}
+		[self.document enumerateBookmarksAtLine:lineNumber block:^(text::pos_t const& pos, NSString* type, NSString* payload){
+			if(payload.length != 0)
+				[content addObject:payload];
+			else if([type isEqualToString:OakDocumentBookmarkIdentifier])
+				bookmarks.push_back(pos);
+		}];
 
-		if(info.empty())
+		if(content.count == 0)
 		{
-			for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier))
-				return buf.remove_mark(pair.first, document::kBookmarkIdentifier);
-			buf.set_mark(buf.begin(lineNumber), document::kBookmarkIdentifier);
+			if(bookmarks.empty())
+					[self.document setMarkOfType:OakDocumentBookmarkIdentifier atPosition:text::pos_t(lineNumber, 0) content:nil];
+			else	[self.document removeMarkOfType:OakDocumentBookmarkIdentifier atPosition:bookmarks.front()];
 		}
 		else
 		{
 			NSView* popoverContainerView = [[NSView alloc] initWithFrame:NSZeroRect];
 
-			NSTextField* textField = OakCreateLabel([NSString stringWithCxxString:text::join(info, "\n")]);
+			NSTextField* textField = OakCreateLabel([content componentsJoinedByString:@"\n"]);
 			OakAddAutoLayoutViewsToSuperview(@[ textField ], popoverContainerView);
 
 			NSDictionary* views = NSDictionaryOfVariableBindings(textField);
@@ -875,80 +801,14 @@ private:
 	}
 }
 
-// ====================
-// = Bookmark Actions =
-// ====================
-
-- (void)goToNextMarkOfType:(NSString*)markType
-{
-	text::selection_t sel(to_s(_textView.selectionString));
-
-	ng::buffer_t const& buf = document->buffer();
-	std::pair<size_t, std::string> const& pair = buf.next_mark(buf.convert(sel.last().max()), to_s(markType));
-	if(pair.second != NULL_STR)
-		_textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
-}
-
-- (IBAction)goToPreviousMarkOfType:(NSString*)markType
-{
-	text::selection_t sel(to_s(_textView.selectionString));
-
-	ng::buffer_t const& buf = document->buffer();
-	std::pair<size_t, std::string> const& pair = buf.prev_mark(buf.convert(sel.last().max()), to_s(markType));
-	if(pair.second != NULL_STR)
-		_textView.selectionString = [NSString stringWithCxxString:buf.convert(pair.first)];
-}
-
-- (IBAction)toggleCurrentBookmark:(id)sender
-{
-	ng::buffer_t& buf = document->buffer();
-
-	text::selection_t sel(to_s(_textView.selectionString));
-	size_t lineNumber = sel.last().max().line;
-
-	std::vector<size_t> toRemove;
-	for(auto const& pair : buf.get_marks(buf.begin(lineNumber), buf.eol(lineNumber), document::kBookmarkIdentifier))
-		toRemove.push_back(pair.first);
-
-	if(toRemove.empty())
-	{
-		buf.set_mark(buf.convert(sel.last().max()), document::kBookmarkIdentifier);
-	}
-	else
-	{
-		for(auto const& index : toRemove)
-			buf.remove_mark(index, document::kBookmarkIdentifier);
-	}
-	[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
-}
-
-- (IBAction)goToNextBookmark:(id)sender
-{
-	[self goToNextMarkOfType:[NSString stringWithCxxString:document::kBookmarkIdentifier]];
-}
-
-- (IBAction)goToPreviousBookmark:(id)sender
-{
-	[self goToPreviousMarkOfType:[NSString stringWithCxxString:document::kBookmarkIdentifier]];
-}
-
 - (void)clearAllBookmarks:(id)sender
 {
-	document->remove_all_marks(document::kBookmarkIdentifier);
+	[self.document removeAllMarksOfType:OakDocumentBookmarkIdentifier];
 }
 
-// ========================
-// = Jump To Mark Actions =
-// ========================
-
-- (IBAction)jumpToNextMark:(id)sender
+- (void)documentMarksDidChange:(NSNotification*)aNotification
 {
-	[self goToNextMarkOfType:nil];
-}
-
-- (IBAction)jumpToPreviousMark:(id)sender
-{
-	[self goToPreviousMarkOfType:nil];
+	[[NSNotificationCenter defaultCenter] postNotificationName:GVColumnDataSourceDidChange object:self];
 }
 
 // =================
@@ -998,6 +858,6 @@ private:
 
 - (void)printDocument:(id)sender
 {
-	[document->document() runPrintOperationModalForWindow:self.window fontName:_textView.font.fontName];
+	[self.document runPrintOperationModalForWindow:self.window fontName:_textView.font.fontName];
 }
 @end

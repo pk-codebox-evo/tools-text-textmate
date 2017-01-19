@@ -1,6 +1,7 @@
 #import "OakChooser.h"
 #import "ui/TableView.h"
 #import "ui/SearchField.h"
+#import <OakAppKit/NSColor Additions.h>
 #import <OakAppKit/OakAppKit.h>
 #import <OakAppKit/OakUIConstructionFunctions.h>
 #import <OakFoundation/OakFoundation.h>
@@ -45,16 +46,15 @@
 	return self;
 }
 
-- (NSAttributedString*)addShadowColor:(NSColor*)shadowColor toString:(id)aString
+- (NSAttributedString*)selectedStringForString:(id)aString
 {
 	NSMutableAttributedString* str = [aString isKindOfClass:[NSString class]] ? [[NSMutableAttributedString alloc] initWithString:aString attributes:nil] : [aString mutableCopy];
-
-	NSShadow* shadow = [NSShadow new];
-	[shadow setShadowColor:shadowColor];
-	[shadow setShadowOffset:NSMakeSize(0, -1)];
-	[shadow setShadowBlurRadius:1];
-
-	[str addAttributes:@{ NSShadowAttributeName : shadow } range:NSMakeRange(0, str.string.length)];
+	[str enumerateAttributesInRange:NSMakeRange(0, str.length) options:NSAttributedStringEnumerationLongestEffectiveRangeNotRequired usingBlock:^(NSDictionary* attrs, NSRange range, BOOL *stop){
+		if(attrs[NSBackgroundColorAttributeName] != nil)
+			[str addAttribute:NSBackgroundColorAttributeName value:[NSColor tmMatchedTextSelectedBackgroundColor] range:range];
+		if(attrs[NSUnderlineColorAttributeName] != nil)
+			[str addAttribute:NSUnderlineColorAttributeName value:[NSColor tmMatchedTextSelectedUnderlineColor] range:range];
+	}];
 	return str;
 }
 
@@ -63,14 +63,12 @@
 	[super setBackgroundStyle:backgroundStyle];
 	if(backgroundStyle == NSBackgroundStyleDark)
 	{
-		self.textField.font              = [NSFont boldSystemFontOfSize:13];
-		self.textField.objectValue       = [self addShadowColor:[NSColor colorWithCalibratedWhite:0.0 alpha:0.5] toString:[self valueForKeyPath:@"objectValue.name"]];
+		self.textField.objectValue       = [self selectedStringForString:[self valueForKeyPath:@"objectValue.name"]];
 		self.folderTextField.textColor   = [NSColor colorWithCalibratedWhite:0.9 alpha:1];
-		self.folderTextField.objectValue = [self addShadowColor:[NSColor colorWithCalibratedWhite:0.5 alpha:0.5] toString:[self valueForKeyPath:@"objectValue.folder"]];
+		self.folderTextField.objectValue = [self selectedStringForString:[self valueForKeyPath:@"objectValue.folder"]];
 	}
 	else
 	{
-		self.textField.font              = [NSFont systemFontOfSize:13];
 		self.textField.objectValue       = [self valueForKeyPath:@"objectValue.name"];
 		self.folderTextField.textColor   = [NSColor colorWithCalibratedWhite:0.5 alpha:1];
 		self.folderTextField.objectValue = [self valueForKeyPath:@"objectValue.folder"];
@@ -91,28 +89,29 @@ NSMutableAttributedString* CreateAttributedStringWithMarkedUpRanges (std::string
 	[paragraphStyle setLineBreakMode:lineBreakMode];
 
 	NSDictionary* baseAttributes      = @{ NSParagraphStyleAttributeName : paragraphStyle };
-	NSDictionary* highlightAttributes = @{ NSParagraphStyleAttributeName : paragraphStyle, NSUnderlineStyleAttributeName : @1 };
+	NSDictionary* highlightAttributes = @{
+		NSParagraphStyleAttributeName  : paragraphStyle,
+		NSBackgroundColorAttributeName : [NSColor tmMatchedTextBackgroundColor],
+		NSUnderlineStyleAttributeName  : @(NSUnderlineStyleSingle),
+		NSUnderlineColorAttributeName  : [NSColor tmMatchedTextUnderlineColor],
+	};
 
 	NSMutableAttributedString* res = [[NSMutableAttributedString alloc] init];
 
 	size_t from = 0;
 	for(auto range : ranges)
 	{
-		[res appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithCxxString:std::string(in.begin() + from, in.begin() + range.first)] attributes:baseAttributes]];
-		[res appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithCxxString:std::string(in.begin() + range.first, in.begin() + range.second)] attributes:highlightAttributes]];
+		[res appendAttributedString:[[NSAttributedString alloc] initWithString:(to_ns(in.substr(from, range.first - from)) ?: @"?") attributes:baseAttributes]];
+		[res appendAttributedString:[[NSAttributedString alloc] initWithString:(to_ns(in.substr(range.first, range.second - range.first)) ?: @"?") attributes:highlightAttributes]];
 		from = range.second;
 	}
 	if(from < in.size())
-		[res appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithCxxString:in.substr(from)] attributes:baseAttributes]];
+		[res appendAttributedString:[[NSAttributedString alloc] initWithString:(to_ns(in.substr(from)) ?: @"?") attributes:baseAttributes]];
 
 	return res;
 }
 
-#if !defined(MAC_OS_X_VERSION_10_11) || (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_11)
-@interface OakChooser () <NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate>
-#else
 @interface OakChooser () <NSWindowDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate>
-#endif
 @end
 
 static void* kFirstResponderBinding = &kFirstResponderBinding;
@@ -142,7 +141,7 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 		tableView.target                  = self;
 		tableView.dataSource              = self;
 		tableView.delegate                = self;
-		if(nil != &NSAccessibilitySharedFocusElementsAttribute)
+		if(nil != &NSAccessibilitySharedFocusElementsAttribute) // MAC_OS_X_VERSION_10_10
 			[_searchField.cell accessibilitySetOverrideValue:@[tableView] forAttribute:NSAccessibilitySharedFocusElementsAttribute];
 		_tableView = tableView;
 
@@ -182,11 +181,10 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 		[_window setContentBorderThickness:23 forEdge:NSMinYEdge];
 		[[_window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
 		[[_window standardWindowButton:NSWindowZoomButton] setHidden:YES];
-		_window.delegate           = self;
-		_window.nextResponder      = self;
-		_window.level              = NSFloatingWindowLevel;
-		_window.releasedWhenClosed = NO;
-		_window.frameAutosaveName  = NSStringFromClass([self class]);
+		_window.delegate          = self;
+		_window.nextResponder     = self;
+		_window.level             = NSFloatingWindowLevel;
+		_window.frameAutosaveName = NSStringFromClass([self class]);
 
 		[_searchField bind:NSValueBinding toObject:self withKeyPath:@"filterString" options:nil];
 		[_window addObserver:self forKeyPath:@"firstResponder" options:NSKeyValueObservingOptionOld|NSKeyValueObservingOptionNew context:kFirstResponderBinding];
@@ -243,7 +241,7 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 		BOOL oldIsSearchField = change[NSKeyValueChangeOldKey] == _searchField || change[NSKeyValueChangeOldKey] == _searchField.currentEditor;
 		BOOL newIsSearchField = change[NSKeyValueChangeNewKey] == _searchField || change[NSKeyValueChangeNewKey] == _searchField.currentEditor;
 		if(oldIsSearchField != newIsSearchField)
-			self.drawTableViewAsHighlighted = newIsSearchField;
+			self.drawTableViewAsHighlighted = newIsSearchField && self.tableView.refusesFirstResponder;
 	}
 }
 
@@ -253,10 +251,7 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 
 - (BOOL)control:(NSControl*)aControl textView:(NSTextView*)aTextView doCommandBySelector:(SEL)aCommand
 {
-	if(aCommand == @selector(deleteToBeginningOfLine:) && [aTextView.window tryToPerform:@selector(delete:) with:aTextView])
-		return YES;
-
-	NSUInteger res = OakPerformTableViewActionFromSelector(self.tableView, aCommand, aTextView);
+	NSUInteger res = OakPerformTableViewActionFromSelector(self.tableView, aCommand);
 	if(res == OakMoveAcceptReturn)
 		[self performDefaultButtonClick:self];
 	else if(res == OakMoveCancelReturn)
@@ -279,7 +274,7 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 	[self updateFilterString:_filterString];
 
 	// see http://lists.apple.com/archives/accessibility-dev/2014/Aug/msg00024.html
-	if(nil != &NSAccessibilitySharedFocusElementsAttribute)
+	if(nil != &NSAccessibilitySharedFocusElementsAttribute) // MAC_OS_X_VERSION_10_10
 		NSAccessibilityPostNotification(_tableView, NSAccessibilitySelectedRowsChangedNotification);
 }
 
@@ -315,7 +310,8 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 		[rowIndexes addIndex:0];
 
 	[_tableView selectRowIndexes:rowIndexes byExtendingSelection:NO];
-	[_tableView scrollRowToVisible:[rowIndexes firstIndex]];
+	if([[NSUserDefaults standardUserDefaults] boolForKey:@"disableFilterListAutoScroll"] == NO)
+		[_tableView scrollRowToVisible:[rowIndexes firstIndex]];
 
 	[self updateStatusText:self];
 
@@ -327,7 +323,7 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 	return [_items objectsAtIndexes:[_tableView selectedRowIndexes]];
 }
 
-- (void)removeItemsAtIndexes:(NSIndexSet*)anIndexSet
+- (NSUInteger)removeItemsAtIndexes:(NSIndexSet*)anIndexSet
 {
 	[_tableView removeRowsAtIndexes:anIndexSet withAnimation:NSTableViewAnimationEffectFade];
 	NSMutableArray* items = [_items mutableCopy];
@@ -337,6 +333,8 @@ static void* kFirstResponderBinding = &kFirstResponderBinding;
 
 	if([_tableView numberOfRows] && ![[_tableView selectedRowIndexes] count] && [anIndexSet count])
 		[_tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:MIN([anIndexSet firstIndex], [_tableView numberOfRows]-1)] byExtendingSelection:NO];
+
+	return anIndexSet.count;
 }
 
 // =================

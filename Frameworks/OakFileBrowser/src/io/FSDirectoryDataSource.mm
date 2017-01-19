@@ -42,7 +42,7 @@ struct tracking_t : fs::event_callback_t
 		_scm_info = scm::info(_path);
 		if(_scm_info)
 		{
-			_scm_info->add_callback(^(scm::info_t const& info){
+			_scm_info->push_callback(^(scm::info_t const& info){
 
 				std::set<std::string> pathsShown, pathsDeleted, pathsMissingOnDisk;
 				for(FSFileItem* item in _item.children)
@@ -124,7 +124,7 @@ struct tracking_t : fs::event_callback_t
 				treat_as_directory = !(flags & (path::flag::package|path::flag::hidden_volume));
 				target             = to_s([[NSURL fileURLWithPath:[NSString stringWithCxxString:path] isDirectory:path::flag::directory|path::flag::package] absoluteString]);
 
-				if(path::extension(path) == ".xcodeproj")
+				if(path::extension(path) == ".xcodeproj" && [[NSUserDefaults standardUserDefaults] boolForKey:@"enableXcodeDataSource"])
 					target = "xcodeproj://localhost" + encode::url_part(path, "/") + "/";
 			}
 			else if(entry->d_type == DT_REG)

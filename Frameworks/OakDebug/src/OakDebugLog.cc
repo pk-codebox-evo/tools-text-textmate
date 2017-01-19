@@ -6,7 +6,7 @@ static std::mutex RegistryMutex;
 
 std::map<std::string, bool>& OakDebugBaseClass::registry ()
 {
-	static std::map<std::string, bool>* Registry = NULL;
+	static std::map<std::string, bool>* Registry = nullptr;
 
 	static bool didLoad = false;
 	if(didLoad == false)
@@ -20,7 +20,7 @@ std::map<std::string, bool>& OakDebugBaseClass::registry ()
 			while(tok = strtok(debug, ", ;"))
 			{
 				(*Registry)[tok] = true;
-				debug = NULL;
+				debug = nullptr;
 			}
 		}
 		didLoad = true;
@@ -33,7 +33,7 @@ std::string OakDebugBaseClass::sectionName (std::string const& title)
 {
 	size_t separatorIndex = title.find("_");
 	if(separatorIndex != std::string::npos && separatorIndex != title.size() - 1)
-		return title.substr(0, separatorIndex).c_str();
+		return title.substr(0, separatorIndex);
 	else
 		return title;
 }

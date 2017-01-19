@@ -1,15 +1,14 @@
 #import "OakChooser.h"
-#import <document/document.h>
-#import <scm/scm.h>
 
 extern NSUInteger const kFileChooserAllSourceIndex;
 extern NSUInteger const kFileChooserOpenDocumentsSourceIndex;
 extern NSUInteger const kFileChooserUncommittedChangesSourceIndex;
 
+@class OakDocument;
+
 PUBLIC @interface FileChooser : OakChooser
 @property (nonatomic) NSString* path;
-@property (nonatomic) std::vector<document::document_ptr> const& openDocuments;
-@property (nonatomic) oak::uuid_t const& currentDocument;
+@property (nonatomic) NSUUID* currentDocument;
 @property (nonatomic) NSUInteger sourceIndex;
 
 + (instancetype)sharedInstance;

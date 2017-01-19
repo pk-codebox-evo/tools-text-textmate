@@ -12,32 +12,36 @@
 	OBJC_WATCH_LEAKS(OakEncodingSaveOptionsViewController);
 	encoding::type _encodingOptions;
 }
+@property (nonatomic) NSString* fileType;
 @property (nonatomic) NSString* lineEndings;
 @property (nonatomic) NSString* encoding;
 @property (nonatomic) NSSavePanel* savePanel;
 @end
 
 @implementation OakEncodingSaveOptionsViewController
++ (void)initialize
+{
+	[OakStringListTransformer createTransformerWithName:@"OakLineEndingsTransformer" andObjectsArray:@[ @"\n", @"\r", @"\r\n" ]];
+}
+
 - (void)dealloc
 {
 	if(_savePanel.delegate == self)
 		_savePanel.delegate = nil;
 }
 
-- (id)initWithEncodingOptions:(encoding::type const&)someEncodingOptions
+- (id)initWithEncodingOptions:(encoding::type const&)someEncodingOptions fileType:(NSString*)aFileType
 {
 	if(self = [super init])
+	{
 		_encodingOptions = someEncodingOptions;
+		_fileType = aFileType;
+	}
 	return self;
 }
 
 - (void)loadView
 {
-	static dispatch_once_t onceToken = 0;
-	dispatch_once(&onceToken, ^{
-		[OakStringListTransformer createTransformerWithName:@"OakLineEndingsTransformer" andObjectsArray:@[ @"\n", @"\r", @"\r\n" ]];
-	});
-
 	NSPopUpButton* encodingPopUpButton    = [[OakEncodingPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
 	NSPopUpButton* lineEndingsPopUpButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
 
@@ -79,7 +83,7 @@
 {
 	encoding::type res = _encodingOptions;
 
-	settings_t const& settings = settings_for_path(to_s([[anURL filePathURL] path]));
+	settings_t const& settings = settings_for_path(to_s([[anURL filePathURL] path]), to_s(_fileType));
 	if(res.charset() == kCharsetNoEncoding)
 		res.set_charset(settings.get(kSettingsEncodingKey, kCharsetUTF8));
 
@@ -96,9 +100,9 @@
 @end
 
 @implementation OakSavePanel
-+ (void)showWithPath:(NSString*)aPathSuggestion directory:(NSString*)aDirectorySuggestion fowWindow:(NSWindow*)aWindow encoding:(encoding::type const&)encoding completionHandler:(void(^)(NSString* path, encoding::type const& encoding))aCompletionHandler
++ (void)showWithPath:(NSString*)aPathSuggestion directory:(NSString*)aDirectorySuggestion fowWindow:(NSWindow*)aWindow encoding:(encoding::type const&)encoding fileType:(NSString*)aFileType completionHandler:(void(^)(NSString* path, encoding::type const& encoding))aCompletionHandler
 {
-	OakEncodingSaveOptionsViewController* optionsViewController = [[OakEncodingSaveOptionsViewController alloc] initWithEncodingOptions:encoding];
+	OakEncodingSaveOptionsViewController* optionsViewController = [[OakEncodingSaveOptionsViewController alloc] initWithEncodingOptions:encoding fileType:aFileType];
 	if(!optionsViewController)
 		return;
 

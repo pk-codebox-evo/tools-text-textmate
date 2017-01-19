@@ -1,14 +1,14 @@
 #import "GutterView.h"
 #import <OakAppKit/OakView.h>
-#import <editor/editor.h>
-#import <buffer/buffer.h>
 #import <theme/theme.h>
-#import <document/document.h>
+#import <command/parser.h>
 #import <oak/debug.h>
 
 PUBLIC extern int32_t const NSWrapColumnWindowWidth;
 PUBLIC extern int32_t const NSWrapColumnAskUser;
 PUBLIC extern NSString* const kUserDefaultsWrapColumnPresetsKey;
+
+@class OakDocument;
 
 namespace bundles { struct item_t; typedef std::shared_ptr<item_t> item_ptr; }
 
@@ -29,16 +29,16 @@ enum OTVFontSmoothing : NSUInteger
 @end
 
 PUBLIC @interface OakTextView : OakView
-- (void)setDocument:(document::document_ptr const&)aDocument;
+@property (nonatomic) OakDocument* document;
 
 @property (nonatomic, weak) id <OakTextViewDelegate>        delegate;
 @property (nonatomic) theme_ptr                             theme;
 @property (nonatomic) NSCursor*                             ibeamCursor;
 @property (nonatomic) NSFont*                               font;
-@property (nonatomic) NSInteger                             fontScaleFactor;
+@property (nonatomic) CGFloat                               fontScaleFactor;
 @property (nonatomic) BOOL                                  antiAlias;
 @property (nonatomic) OTVFontSmoothing                      fontSmoothing;
-@property (nonatomic) size_t                                tabSize;
+@property (nonatomic) NSUInteger                            tabSize;
 @property (nonatomic) BOOL                                  showInvisibles;
 @property (nonatomic) BOOL                                  softWrap;
 @property (nonatomic) BOOL                                  scrollPastEnd;
@@ -47,8 +47,9 @@ PUBLIC @interface OakTextView : OakView
 @property (nonatomic, readonly) BOOL                        hasMultiLineSelection;
 @property (nonatomic, readonly) BOOL                        hasSelection;
 @property (nonatomic) NSString*                             selectionString;
+@property (nonatomic, readonly) NSString*                   symbol;
 
-@property (nonatomic) BOOL                                  isMacroRecording;
+@property (nonatomic, getter = isRecordingMacro) BOOL       recordingMacro;
 
 - (GVLineRecord)lineRecordForPosition:(CGFloat)yPos;
 - (GVLineRecord)lineFragmentForLine:(NSUInteger)aLine column:(NSUInteger)aColumn;

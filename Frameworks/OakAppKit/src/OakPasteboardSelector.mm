@@ -5,6 +5,7 @@
 */
 
 #import "OakPasteboardSelector.h"
+#import <OakAppKit/OakAppKit.h>
 #import <ns/ns.h>
 #import <oak/oak.h>
 #import <oak/debug.h>
@@ -31,21 +32,25 @@ static size_t line_count (std::string const& text)
 	return cell;
 }
 
-- (NSDictionary*)textAttributes;
+- (NSDictionary*)textAttributes
 {
 	static NSMutableParagraphStyle* const style = [[NSParagraphStyle defaultParagraphStyle] mutableCopy];
 	[style setLineBreakMode:NSLineBreakByTruncatingTail];
 	if([self isHighlighted])
 	{
-		static NSDictionary* const highlightedAttributes = [[NSDictionary alloc] initWithObjectsAndKeys:
-			[NSColor alternateSelectedControlTextColor], NSForegroundColorAttributeName,
-			style, NSParagraphStyleAttributeName,
-			nil];
+		static NSDictionary* const highlightedAttributes = @{
+			NSForegroundColorAttributeName : [NSColor alternateSelectedControlTextColor],
+			NSParagraphStyleAttributeName  : style,
+			NSFontAttributeName            : [NSFont controlContentFontOfSize:0],
+		};
 		return highlightedAttributes;
 	}
 	else
 	{
-		static NSDictionary* const attributes = [[NSDictionary alloc] initWithObjectsAndKeys:style, NSParagraphStyleAttributeName, nil];
+		static NSDictionary* const attributes = @{
+			NSParagraphStyleAttributeName : style,
+			NSFontAttributeName           : [NSFont controlContentFontOfSize:0],
+		};
 		return attributes;
 	}
 }
@@ -93,20 +98,23 @@ static size_t line_count (std::string const& text)
 {
 	NSArray* lines        = [[self objectValue] componentsSeparatedByString:@"\n"];
 	NSArray* clippedLines = [lines subarrayWithRange:NSMakeRange(0, [self lineCountForText:[self objectValue]])];
-	NSRect rowFrame       = frame;
+	NSRect rowFrame       = NSInsetRect(frame, 2, 1);
 	rowFrame.size.height  = [[lines objectAtIndex:0] sizeWithAttributes:[self textAttributes]].height;
 	for(size_t index = 0; index < [clippedLines count]; ++index)
 	{
 		if(index == [clippedLines count] - 1 && [clippedLines count] < [lines count])
 		{
 			NSString* moreLinesText           = [NSString stringWithFormat:@"%lu more line%s", [lines count] - [clippedLines count], ([lines count] - [clippedLines count]) != 1 ? "s" : ""];
-			NSDictionary* moreLinesAttributes = @{ NSForegroundColorAttributeName : ([self isHighlighted] ? [NSColor darkGrayColor] : [NSColor lightGrayColor]) };
+			NSDictionary* moreLinesAttributes = @{
+				NSForegroundColorAttributeName : ([self isHighlighted] ? [NSColor whiteColor] : [NSColor lightGrayColor]),
+				NSFontAttributeName            : [NSFont controlContentFontOfSize:[NSFont systemFontSizeForControlSize:NSSmallControlSize]],
+			};
 			NSAttributedString* moreLines     = [[NSAttributedString alloc] initWithString:moreLinesText attributes:moreLinesAttributes];
 			NSSize size             = [moreLines size];
 			NSRect moreLinesRect    = rowFrame;
-			moreLinesRect.origin.x += frame.size.width - size.width;
+			moreLinesRect.origin.x += frame.size.width - size.width - 4;
 			moreLinesRect.size      = size;
-			rowFrame.size.width    -= size.width + 5;
+			rowFrame.size.width    -= size.width + 9;
 			[moreLines drawInRect:moreLinesRect];
 		}
 		[[clippedLines objectAtIndex:index] drawInRect:rowFrame withAttributes:[self textAttributes]];
@@ -116,7 +124,7 @@ static size_t line_count (std::string const& text)
 
 - (CGFloat)rowHeightForText:(NSString*)text;
 {
-	return [self lineCountForText:text] * [@"n" sizeWithAttributes:[self textAttributes]].height;
+	return 2 + [self lineCountForText:text] * [@"n" sizeWithAttributes:[self textAttributes]].height;
 }
 @end
 
@@ -219,7 +227,7 @@ static size_t line_count (std::string const& text)
 		[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:MIN(selectedRow, [entries count]-1)] byExtendingSelection:NO];
 }
 
-- (void)insertNewline:(id)sender
+- (void)accept:(id)sender
 {
 	shouldSendAction = entries.count > 0 ? YES : NO;
 	shouldClose = YES;
@@ -230,34 +238,26 @@ static size_t line_count (std::string const& text)
 	shouldClose = YES;
 }
 
+- (void)doCommandBySelector:(SEL)aSelector
+{
+	if([self respondsToSelector:aSelector])
+	{
+		[super doCommandBySelector:aSelector];
+	}
+	else
+	{
+		NSUInteger res = OakPerformTableViewActionFromSelector(tableView, aSelector);
+		if(res == OakMoveAcceptReturn)
+			[self accept:self];
+		else if(res == OakMoveCancelReturn)
+			[self cancel:self];
+	}
+}
+
 - (void)keyDown:(NSEvent*)anEvent
 {
 	[self interpretKeyEvents:@[ anEvent ]];
 }
-
-- (void)moveSelectedRowByOffset:(NSInteger)anOffset
-{
-	if(tableView.numberOfRows > 0)
-	{
-		NSInteger row = oak::cap<NSInteger>(0, tableView.selectedRow + anOffset, tableView.numberOfRows - 1);
-		[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
-		[tableView scrollRowToVisible:row];
-	}
-}
-
-- (int)visibleRows                             { return (int)floor(NSHeight([tableView visibleRect]) / ([tableView rowHeight]+[tableView intercellSpacing].height)) - 1; }
-
-- (void)moveUp:(id)sender                      { [self moveSelectedRowByOffset:-1]; }
-- (void)moveDown:(id)sender                    { [self moveSelectedRowByOffset:+1];}
-- (void)movePageUp:(id)sender                  { [self moveSelectedRowByOffset:-[self visibleRows]]; }
-- (void)movePageDown:(id)sender                { [self moveSelectedRowByOffset:+[self visibleRows]]; }
-- (void)scrollToBeginningOfDocument:(id)sender { [self moveSelectedRowByOffset:-(INT_MAX >> 1)]; }
-- (void)scrollToEndOfDocument:(id)sender       { [self moveSelectedRowByOffset:+(INT_MAX >> 1)]; }
-
-- (void)pageUp:(id)sender                      { [self movePageUp:sender]; }
-- (void)pageDown:(id)sender                    { [self movePageDown:sender]; }
-- (void)scrollPageUp:(id)sender                { [self movePageUp:sender]; }
-- (void)scrollPageDown:(id)sender              { [self movePageDown:sender]; }
 
 - (void)didDoubleClickInTableView:(id)aTableView
 {
@@ -281,10 +281,10 @@ static size_t line_count (std::string const& text)
 @end
 
 @implementation OakPasteboardSelector
-+ (OakPasteboardSelector*)sharedInstance
++ (instancetype)sharedInstance
 {
-	static OakPasteboardSelector* instance = [OakPasteboardSelector new];
-	return instance;
+	static OakPasteboardSelector* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 - (id)init

@@ -3,6 +3,7 @@
 #import "OakAppKit.h"
 #import "OakScopeBarView.h"
 #import "OakUIConstructionFunctions.h"
+#import "OakSyntaxFormatter.h"
 #import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSString Additions.h>
 #import <ns/ns.h>
@@ -13,6 +14,22 @@
 	static NSAttributedString* const lineJoiner = [[NSAttributedString alloc] initWithString:@"¬" attributes:@{ NSForegroundColorAttributeName : [NSColor lightGrayColor] }];
 	static NSAttributedString* const tabJoiner  = [[NSAttributedString alloc] initWithString:@"‣" attributes:@{ NSForegroundColorAttributeName : [NSColor lightGrayColor] }];
 	static NSAttributedString* const ellipsis   = [[NSAttributedString alloc] initWithString:@"…" attributes:@{ NSForegroundColorAttributeName : [NSColor lightGrayColor] }];
+
+	NSMutableParagraphStyle* paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+	[paragraphStyle setLineBreakMode:NSLineBreakByTruncatingTail];
+	NSDictionary* defaultAttributes = @{
+		NSParagraphStyleAttributeName : paragraphStyle,
+		NSFontAttributeName : [NSFont controlContentFontOfSize:0]
+	};
+
+	if([self.options[OakFindRegularExpressionOption] boolValue])
+	{
+		OakSyntaxFormatter* formatter = [[OakSyntaxFormatter alloc] initWithGrammarName:@"source.regexp.oniguruma"];
+		formatter.enabled = YES;
+		NSMutableAttributedString* str = [[NSMutableAttributedString alloc] initWithString:self.string attributes:defaultAttributes];
+		[formatter addStylesToString:str];
+		return str;
+	}
 
 	NSMutableAttributedString* res = [[NSMutableAttributedString alloc] init];
 
@@ -37,19 +54,12 @@
 		}
 	}];
 
-	NSMutableParagraphStyle* paragraphStyle = [[NSMutableParagraphStyle alloc] init];
-	[paragraphStyle setLineBreakMode:NSLineBreakByTruncatingTail];
-	[res addAttributes:@{ NSParagraphStyleAttributeName : paragraphStyle } range:NSMakeRange(0, [[res string] length])];
-
+	[res addAttributes:defaultAttributes range:NSMakeRange(0, res.string.length)];
 	return res;
 }
 @end
 
-#if !defined(MAC_OS_X_VERSION_10_11) || (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_11)
-@interface OakPasteboardChooser () <NSWindowDelegate, NSTextFieldDelegate, NSTableViewDelegate>
-#else
 @interface OakPasteboardChooser () <NSWindowDelegate, NSTextFieldDelegate, NSTableViewDelegate, NSSearchFieldDelegate>
-#endif
 @property (nonatomic) OakPasteboard*        pasteboard;
 @property (nonatomic) NSArrayController*    arrayController;
 @property (nonatomic) NSWindow*             window;
@@ -126,7 +136,6 @@ static NSMutableDictionary* SharedChoosers;
 		_window.autorecalculatesKeyViewLoop = YES;
 		_window.delegate                    = self;
 		_window.level                       = NSFloatingWindowLevel;
-		_window.releasedWhenClosed          = NO;
 		_window.title                       = windowTitle;
 
 		_arrayController = [[NSArrayController alloc] init];
@@ -286,6 +295,7 @@ static NSMutableDictionary* SharedChoosers;
 		{
 			NSMutableAttributedString* str = [obj mutableCopy];
 			[str addAttribute:NSForegroundColorAttributeName value:[NSColor alternateSelectedControlTextColor] range:NSMakeRange(0, [str length])];
+			[str removeAttribute:NSBackgroundColorAttributeName range:NSMakeRange(0, [str length])];
 			[aCell setAttributedStringValue:str];
 		}
 	}
@@ -314,13 +324,11 @@ static NSMutableDictionary* SharedChoosers;
 - (void)clearAll:(id)sender
 {
 	NSFetchRequest* request = [NSFetchRequest fetchRequestWithEntityName:@"PasteboardEntry"];
-	request.predicate = [NSPredicate predicateWithFormat:@"pasteboard = %@", _pasteboard];
+	request.predicate = [NSPredicate predicateWithFormat:@"pasteboard = %@ AND SELF != %@", _pasteboard, _pasteboard.currentEntry];
+	request.includesPropertyValues = NO;
 	NSManagedObjectContext* managedObjectContext = _pasteboard.managedObjectContext;
 	for(OakPasteboardEntry* entry in [managedObjectContext executeFetchRequest:request error:nullptr])
-	{
-		if(entry != _pasteboard.currentEntry)
-			[managedObjectContext deleteObject:entry];
-	}
+		[managedObjectContext deleteObject:entry];
 }
 
 - (NSArray*)selectedEntriesPreservingOne
@@ -372,6 +380,22 @@ static NSMutableDictionary* SharedChoosers;
 		[fieldEditor setSelectedRange:NSMakeRange([[fieldEditor string] length], 0)];
 }
 
+- (void)doCommandBySelector:(SEL)aSelector
+{
+	if([self respondsToSelector:aSelector])
+	{
+		[super doCommandBySelector:aSelector];
+	}
+	else
+	{
+		NSUInteger res = OakPerformTableViewActionFromSelector(_tableView, aSelector);
+		if(res == OakMoveAcceptReturn)
+			[self accept:self];
+		else if(res == OakMoveCancelReturn)
+			[self cancel:self];
+	}
+}
+
 - (void)keyDown:(NSEvent*)anEvent
 {
 	[self interpretKeyEvents:@[ anEvent ]];
@@ -383,43 +407,15 @@ static NSMutableDictionary* SharedChoosers;
 
 - (BOOL)control:(NSControl*)aControl textView:(NSTextView*)aTextView doCommandBySelector:(SEL)aCommand
 {
-	static auto const forward = new std::set<SEL>{ @selector(moveUp:), @selector(moveDown:), @selector(moveUpAndModifySelection:), @selector(moveDownAndModifySelection:), @selector(pageUp:), @selector(pageDown:), @selector(movePageUp:), @selector(movePageDown:), @selector(scrollPageUp:), @selector(scrollPageDown:), @selector(moveToBeginningOfDocument:), @selector(moveToEndOfDocument:), @selector(scrollToBeginningOfDocument:), @selector(scrollToEndOfDocument:), @selector(insertNewline:), @selector(insertNewlineIgnoringFieldEditor:), @selector(cancelOperation:) };
-	if(forward->find(aCommand) != forward->end() && [self respondsToSelector:aCommand])
-		return [NSApp sendAction:aCommand to:self from:aControl];
-	return NO;
+	static auto const forward = new std::set<SEL>{ @selector(moveUp:), @selector(moveDown:), @selector(moveUpAndModifySelection:), @selector(moveDownAndModifySelection:), @selector(pageUp:), @selector(pageDown:), @selector(pageUpAndModifySelection:), @selector(pageDownAndModifySelection:), @selector(scrollPageUp:), @selector(scrollPageDown:), @selector(moveToBeginningOfDocument:), @selector(moveToEndOfDocument:), @selector(scrollToBeginningOfDocument:), @selector(scrollToEndOfDocument:), @selector(insertNewline:), @selector(insertNewlineIgnoringFieldEditor:), @selector(cancelOperation:) };
+	if(forward->find(aCommand) == forward->end())
+		return NO;
+
+	NSUInteger res = OakPerformTableViewActionFromSelector(_tableView, aCommand);
+	if(res == OakMoveAcceptReturn)
+		[self accept:aControl];
+	else if(res == OakMoveCancelReturn)
+		[self cancel:aControl];
+	return YES;
 }
-
-- (void)moveSelectedRowByOffset:(NSInteger)anOffset extendingSelection:(BOOL)extend
-{
-	if([_tableView numberOfRows])
-	{
-		if(_tableView.allowsMultipleSelection == NO)
-			extend = NO;
-		NSInteger row = oak::cap((NSInteger)0, [_tableView selectedRow] + anOffset, [_tableView numberOfRows] - 1);
-		[_tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:extend];
-		[_tableView scrollRowToVisible:row];
-	}
-}
-
-- (int)visibleRows                                      { return (int)floor(NSHeight([_tableView visibleRect]) / ([_tableView rowHeight]+[_tableView intercellSpacing].height)) - 1; }
-
-- (void)moveUp:(id)sender                               { [self moveSelectedRowByOffset:-1 extendingSelection:NO]; }
-- (void)moveDown:(id)sender                             { [self moveSelectedRowByOffset:+1 extendingSelection:NO]; }
-- (void)moveUpAndModifySelection:(id)sender             { [self moveSelectedRowByOffset:-1 extendingSelection:YES];}
-- (void)moveDownAndModifySelection:(id)sender           { [self moveSelectedRowByOffset:+1 extendingSelection:YES];}
-- (void)movePageUp:(id)sender                           { [self moveSelectedRowByOffset:-[self visibleRows] extendingSelection:NO]; }
-- (void)movePageDown:(id)sender                         { [self moveSelectedRowByOffset:+[self visibleRows] extendingSelection:NO]; }
-- (void)moveToBeginningOfDocument:(id)sender            { [self moveSelectedRowByOffset:-(INT_MAX >> 1) extendingSelection:NO]; }
-- (void)moveToEndOfDocument:(id)sender                  { [self moveSelectedRowByOffset:+(INT_MAX >> 1) extendingSelection:NO]; }
-
-- (void)pageUp:(id)sender                               { [self movePageUp:sender]; }
-- (void)pageDown:(id)sender                             { [self movePageDown:sender]; }
-- (void)scrollPageUp:(id)sender                         { [self movePageUp:sender]; }
-- (void)scrollPageDown:(id)sender                       { [self movePageDown:sender]; }
-- (void)scrollToBeginningOfDocument:(id)sender          { [self moveToBeginningOfDocument:sender]; }
-- (void)scrollToEndOfDocument:(id)sender                { [self moveToEndOfDocument:sender]; }
-
-- (IBAction)insertNewline:(id)sender                    { [NSApp sendAction:@selector(accept:) to:nil from:sender]; }
-- (IBAction)insertNewlineIgnoringFieldEditor:(id)sender { [NSApp sendAction:@selector(accept:) to:nil from:sender]; }
-- (IBAction)cancelOperation:(id)sender                  { [NSApp sendAction:@selector(cancel:) to:nil from:sender]; }
 @end

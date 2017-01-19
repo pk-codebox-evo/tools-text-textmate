@@ -41,7 +41,7 @@ static void random_insert (ng::buffer_t& dst, std::string const& src)
 
 	std::vector<size_t> ordering(lengths.size());
 	std::iota(ordering.begin(), ordering.end(), 0);
-	std::random_shuffle(ordering.begin(), ordering.end());
+	oak::random_shuffle(ordering.begin(), ordering.end());
 
 	std::vector<size_t> srcOffsets(lengths.size(), 0);
 	struct fragment_t { size_t dst, src, len; };
@@ -127,7 +127,7 @@ private:
 		for(auto const& item : bundles::query(bundles::kFieldGrammarScope, "source.c++"))
 			buffer.set_grammar(item);
 
-		theme_ptr theme = parse_theme(bundles::lookup("71D40D9D-AE48-11D9-920A-000D93589AF6"));
+		theme_ptr theme = parse_theme(bundles::lookup(kMacClassicThemeUUID));
 		layout.reset(new ng::layout_t(buffer, theme, "GillSans", 14, true));
 		layout->set_viewport_size([[self enclosingScrollView] documentVisibleRect].size);
 	}

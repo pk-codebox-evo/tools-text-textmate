@@ -19,9 +19,11 @@ NSString* const OakFindFullWordsOption             = @"fullWordMatch";
 NSString* const OakFindRegularExpressionOption     = @"regularExpression";
 
 NSString* const kUserDefaultsDisablePersistentClipboardHistory = @"disablePersistentClipboardHistory";
+NSString* const kUserDefaultsClipboardHistoryKeepAtLeast       = @"clipboardHistoryKeepAtLeast";
+NSString* const kUserDefaultsClipboardHistoryKeepAtMost        = @"clipboardHistoryKeepAtMost";
+NSString* const kUserDefaultsClipboardHistoryDaysToKeep        = @"clipboardHistoryDaysToKeep";
 
 @interface OakPasteboardEntry ()
-@property (nonatomic) NSDate* date;
 @property (nonatomic) OakPasteboard* pasteboard;
 @property (nonatomic) NSDictionary* primitiveOptions;
 @end
@@ -89,7 +91,6 @@ NSString* const kUserDefaultsDisablePersistentClipboardHistory = @"disablePersis
 @interface OakPasteboard ()
 @property (nonatomic) NSInteger changeCount;
 @property (nonatomic) BOOL disableSystemPasteboardUpdating;
-@property (nonatomic) BOOL needsSavePasteboardHistory;
 @property (nonatomic) OakPasteboardEntry* primitiveCurrentEntry;
 - (BOOL)avoidsDuplicates;
 - (void)checkForExternalPasteboardChanges;
@@ -147,12 +148,10 @@ namespace
 	}
 }
 
-static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
+static NSMutableDictionary<NSString*, OakPasteboard*>* SharedInstances = [NSMutableDictionary new];
+static BOOL HasPersistentStore = NO;
 
 @implementation OakPasteboard
-{
-	BOOL _needsSavePasteboardHistory;
-}
 @dynamic name, currentEntry, auxiliaryOptionsForCurrent, primitiveCurrentEntry;
 @synthesize changeCount, disableSystemPasteboardUpdating;
 
@@ -160,6 +159,12 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 {
 	static dispatch_once_t onceToken = 0;
 	dispatch_once(&onceToken, ^{
+		[[NSUserDefaults standardUserDefaults] registerDefaults:@{
+			kUserDefaultsClipboardHistoryKeepAtLeast :  @25,
+			kUserDefaultsClipboardHistoryKeepAtMost  : @500,
+			kUserDefaultsClipboardHistoryDaysToKeep  :  @30,
+		}];
+
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationDidBecomeActiveNotification:) name:NSApplicationDidBecomeActiveNotification object:NSApp];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationDidResignActiveNotification:) name:NSApplicationDidResignActiveNotification object:NSApp];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(applicationWillTerminate:) name:NSApplicationWillTerminateNotification object:NSApp];
@@ -208,7 +213,7 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 		{
 			NSLog(@"unable to create folder ‘%@’: %@", [appSupport path], error);
 			[NSApp presentError:error];
-			crash_reporter_info_t crashInfo(to_s(error));
+			crash_reporter_info_t info(to_s(error));
 			abort();
 		}
 
@@ -240,9 +245,9 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 					continue;
 			}
 			[NSApp presentError:error];
-			crash_reporter_info_t crashInfo(to_s(error));
-			abort();
+			break;
 		}
+		HasPersistentStore = YES;
 	}
 	return persistentStoreCoordinator;
 }
@@ -317,8 +322,11 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 		return YES;
 
 	BOOL res = YES;
-	if([self.managedObjectContext hasChanges])
+	if([self.managedObjectContext hasChanges] && HasPersistentStore)
 	{
+		for(NSString* name in SharedInstances)
+			[SharedInstances[name] pruneHistory:self];
+
 		@try {
 			NSError* error = nil;
 			if(!(res = [self.managedObjectContext save:&error]))
@@ -345,6 +353,7 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 			res = [NSEntityDescription insertNewObjectForEntityForName:@"Pasteboard" inManagedObjectContext:self.managedObjectContext];
 			res.name = aName;
 
+			// LEGACY format used prior to 2.0-alpha.9513
 			NSString* userDefaultsKey = [aName isEqualToString:OakReplacePboard] ? @"NSReplacePboard" : aName;
 			if(NSArray* history = [[NSUserDefaults standardUserDefaults] arrayForKey:userDefaultsKey])
 			{
@@ -424,7 +433,7 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 			[[self pasteboard] setPropertyList:newEntry.options forType:OakPasteboardOptionsPboardType];
 		}
 		self.changeCount = [[self pasteboard] changeCount];
-		self.needsSavePasteboardHistory = YES;
+		[self scheduleSaveHistory:self];
 	}
 
 	[self willChangeValueForKey:@"currentEntry"];
@@ -446,27 +455,43 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 	[self internalAddEntryWithString:aString andOptions:someOptions];
 }
 
-- (void)savePasteboardHistory:(id)sender
+- (void)scheduleSaveHistory:(id)sender
 {
-	_needsSavePasteboardHistory = NO;
+	static NSTimer* saveHistoryTimer = nil;
+	[saveHistoryTimer invalidate];
+	saveHistoryTimer = [NSTimer scheduledTimerWithTimeInterval:30 target:[OakPasteboard class] selector:@selector(saveHistoryTimerDidFire:) userInfo:nil repeats:NO];
+}
+
+- (void)pruneHistory:(id)sender
+{
+	NSInteger keepAtLeast = [[NSUserDefaults standardUserDefaults] integerForKey:kUserDefaultsClipboardHistoryKeepAtLeast];
+	NSInteger keepAtMost  = [[NSUserDefaults standardUserDefaults] integerForKey:kUserDefaultsClipboardHistoryKeepAtMost];
+	CGFloat daysToKeep    = [[NSUserDefaults standardUserDefaults] floatForKey:kUserDefaultsClipboardHistoryDaysToKeep];
+
+	NSFetchRequest* request = [NSFetchRequest fetchRequestWithEntityName:@"PasteboardEntry"];
+	request.sortDescriptors = @[ [NSSortDescriptor sortDescriptorWithKey:@"date" ascending:NO] ];
+	request.predicate       = [NSPredicate predicateWithFormat:@"pasteboard = %@", self];
+	request.fetchLimit      = keepAtMost;
+
+	NSArray<OakPasteboardEntry*>* allEntries = [self.managedObjectContext executeFetchRequest:request error:nullptr];
+
+	NSDate* keepUntil = [NSDate dateWithTimeIntervalSinceNow:-daysToKeep*24*60*60];
+	if(keepAtMost <= allEntries.count)
+		keepUntil = [keepUntil laterDate:allEntries[keepAtMost-1].date];
+	if(keepAtLeast <= allEntries.count)
+		keepUntil = [keepUntil earlierDate:allEntries[keepAtLeast-1].date];
+
+	request = [NSFetchRequest fetchRequestWithEntityName:@"PasteboardEntry"];
+	request.predicate = [NSPredicate predicateWithFormat:@"pasteboard = %@ AND date < %@ AND SELF != %@", self, keepUntil, self.currentEntry];
+	request.includesPropertyValues = NO;
+
+	for(OakPasteboardEntry* entry in [self.managedObjectContext executeFetchRequest:request error:nullptr])
+		[entry.managedObjectContext deleteObject:entry];
+}
+
++ (void)saveHistoryTimerDidFire:(NSTimer*)aTimer
+{
 	[OakPasteboard saveContext];
-}
-
-- (BOOL)needsSavePasteboardHistory
-{
-	return _needsSavePasteboardHistory;
-}
-
-- (void)setNeedsSavePasteboardHistory:(BOOL)flag
-{
-	if(_needsSavePasteboardHistory == flag)
-		return;
-	if([[NSUserDefaults standardUserDefaults] boolForKey:kUserDefaultsDisablePersistentClipboardHistory])
-		return;
-
-	_needsSavePasteboardHistory = flag;
-	if(flag)
-		[self performSelector:@selector(savePasteboardHistory:) withObject:self afterDelay:60];
 }
 
 - (void)internalAddEntryWithString:(NSString*)aString andOptions:(NSDictionary*)someOptions
@@ -486,14 +511,7 @@ static NSMutableDictionary* SharedInstances = [NSMutableDictionary new];
 			return;
 		}
 	}
-#if 0
-	static NSInteger const kHistorySize = 10000;
-	if([self.entries count] > kHistorySize)
-	{
-		for(OakPasteboardEntry* entry in [self.entries objectsAtIndexes:[[NSIndexSet alloc] initWithIndexesInRange:NSMakeRange(0, [self.entries count] - kHistorySize/2)]])
-			[entry.managedObjectContext deleteObject:entry];
-	}
-#endif
+
 	OakPasteboardEntry* entry = [OakPasteboardEntry pasteboardEntryWithString:aString andOptions:someOptions inContext:self.managedObjectContext];
 	entry.pasteboard = self;
 	self.currentEntry = entry;

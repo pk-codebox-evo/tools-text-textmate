@@ -3,17 +3,13 @@
 
 #include "download.h" // filter_t
 #include <io/io.h>
-#include <OakSystem/application.h>
 #include <text/format.h>
 
 namespace network
 {
 	struct save_t : filter_t
 	{
-		save_t (bool cleanup = true) : _cleanup(cleanup)
-		{
-			path = path::temp("dl_save_filter");
-		}
+		save_t (bool cleanup = true) : path(path::temp("dl_save_filter")), _cleanup(cleanup) { }
 
 		~save_t ()
 		{

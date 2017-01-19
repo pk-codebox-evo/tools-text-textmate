@@ -7,6 +7,9 @@
 #import <OakAppKit/OakAppKit.h>
 #import <oak/debug.h>
 
+@interface HOStatusBar (BusyAndProgressProperties) <HOJSBridgeDelegate>
+@end
+
 @interface OakHTMLOutputView ()
 {
 	OBJC_WATCH_LEAKS(OakHTMLOutputView);
@@ -15,12 +18,22 @@
 @property (nonatomic) HOAutoScroll* autoScrollHelper;
 @property (nonatomic) std::map<std::string, std::string> environment;
 @property (nonatomic) NSRect pendingVisibleRect;
+@property (nonatomic, getter = isVisible) BOOL visible;
 @end
 
 @implementation OakHTMLOutputView
 + (NSSet*)keyPathsForValuesAffectingMainFrameTitle
 {
 	return [NSSet setWithObjects:@"webView.mainFrameTitle", nil];
+}
+
+- (instancetype)initWithFrame:(NSRect)aRect
+{
+	if(self = [super initWithFrame:aRect])
+	{
+		_reusable = YES;
+	}
+	return self;
 }
 
 - (void)loadRequest:(NSURLRequest*)aRequest environment:(std::map<std::string, std::string> const&)anEnvironment autoScrolls:(BOOL)flag
@@ -83,7 +96,7 @@
 	}
 }
 
-- (void)loadHTMLString:(NSString*)someHTML
+- (void)setContent:(NSString*)someHTML
 {
 	self.pendingVisibleRect = [[[[self.webView mainFrame] frameView] documentView] visibleRect];
 	[[self.webView mainFrame] loadHTMLString:someHTML baseURL:[NSURL fileURLWithPath:NSHomeDirectory()]];
@@ -100,13 +113,26 @@
 	return self.webView.mainFrameTitle;
 }
 
+- (void)viewDidMoveToWindow
+{
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowWillCloseNotification object:nil];
+	if(self.window)
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(windowWillClose:) name:NSWindowWillCloseNotification object:self.window];
+	self.visible = self.window ? YES : NO;
+}
+
+- (void)windowWillClose:(NSNotification*)aNotification
+{
+	self.visible = NO;
+}
+
 // =======================
 // = Frame Load Delegate =
 // =======================
 
 - (void)webView:(WebView*)sender didStartProvisionalLoadForFrame:(WebFrame*)frame
 {
-	self.statusBar.isBusy = YES;
+	self.statusBar.busy = YES;
 	[self setUpdatesProgress:!self.isRunningCommand];
 }
 

@@ -1,6 +1,7 @@
 #import "CrashReporter.h"
 #import "find_reports.h"
 #import <OakFoundation/NSString Additions.h>
+#import <Preferences/Keys.h>
 #import <network/post.h>
 #import <plist/date.h>
 #import <io/path.h>
@@ -8,9 +9,7 @@
 #import <ns/ns.h>
 #import <oak/oak.h>
 
-NSString* const kUserDefaultsDisableCrashReportingKey   = @"DisableCrashReports";
-NSString* const kUserDefaultsCrashReportsContactInfoKey = @"CrashReportsContactInfo";
-NSString* const kUserDefaultsCrashReportsSent           = @"CrashReportsSent";
+NSString* const kUserDefaultsCrashReportsSent = @"CrashReportsSent";
 
 static std::string hardware_info (int field, bool integer = false)
 {
@@ -49,25 +48,10 @@ static std::string create_gzipped_file (std::string const& path)
 @end
 
 @implementation CrashReporter
-+ (CrashReporter*)sharedInstance
++ (instancetype)sharedInstance
 {
-	static CrashReporter* instance = [CrashReporter new];
-	return instance;
-}
-
-- (void)setupUserDefaultsContact:(id)sender
-{
-	NSString* name = NSFullUserName();
-	if(ABAddressBook* ab = [ABAddressBook sharedAddressBook])
-	{
-		ABMutableMultiValue* value = [[ab me] valueForProperty:kABEmailProperty];
-		if(NSString* email = [value valueAtIndex:[value indexForIdentifier:[value primaryIdentifier]]])
-			name = name ? [NSString stringWithFormat:@"%@ <%@>", name, email] : email;
-	}
-
-	[[NSUserDefaults standardUserDefaults] registerDefaults:@{
-		kUserDefaultsCrashReportsContactInfoKey : name ?: @"Anonymous",
-	}];
+	static CrashReporter* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 - (id)init
@@ -91,13 +75,10 @@ static std::string create_gzipped_file (std::string const& path)
 
 - (void)applicationDidFinishLaunching:(NSNotification*)aNotification
 {
-	if(NSClassFromString(@"NSUserNotification"))
+	if(NSDictionary* userInfo = [aNotification userInfo])
 	{
-		if(NSDictionary* userInfo = [aNotification userInfo])
-		{
-			if(NSUserNotification* notification = userInfo[NSApplicationLaunchUserNotificationKey])
-				[self userNotificationCenter:[NSUserNotificationCenter defaultUserNotificationCenter] didActivateNotification:notification];
-		}
+		if(NSUserNotification* notification = userInfo[NSApplicationLaunchUserNotificationKey])
+			[self userNotificationCenter:[NSUserNotificationCenter defaultUserNotificationCenter] didActivateNotification:notification];
 	}
 }
 
@@ -110,7 +91,7 @@ static std::string create_gzipped_file (std::string const& path)
 
 		// has sent: reports we already posted
 		std::set<std::string> hasSent;
-		for(NSString* path in [[NSUserDefaults standardUserDefaults] arrayForKey:kUserDefaultsCrashReportsSent])
+		for(NSString* path in [[NSUserDefaults standardUserDefaults] stringArrayForKey:kUserDefaultsCrashReportsSent])
 			hasSent.insert([path fileSystemRepresentation]);
 
 		// can send: all reports from the last week
@@ -130,7 +111,6 @@ static std::string create_gzipped_file (std::string const& path)
 		if(!shouldSend.empty())
 		{
 			dispatch_sync(dispatch_get_main_queue(), ^{
-				[self setupUserDefaultsContact:self];
 				contact = to_s([[NSUserDefaults standardUserDefaults] stringForKey:kUserDefaultsCrashReportsContactInfoKey]);
 			});
 		}
@@ -151,20 +131,17 @@ static std::string create_gzipped_file (std::string const& path)
 				{
 					didSend.insert(report);
 
-					if(NSClassFromString(@"NSUserNotification"))
+					auto location = response.find("location");
+					if(location != response.end())
 					{
-						auto location = response.find("location");
-						if(location != response.end())
-						{
-							NSString* path = [NSString stringWithCxxString:report];
-							NSString* url  = [NSString stringWithCxxString:location->second];
+						NSString* path = [NSString stringWithCxxString:report];
+						NSString* url  = [NSString stringWithCxxString:location->second];
 
-							NSUserNotification* notification = [NSUserNotification new];
-							notification.title           = @"Crash Report Sent";
-							notification.informativeText = @"Diagnostic information has been sent to MacroMates.com regarding your last crash.";
-							notification.userInfo        = @{ @"path" : path, @"url" : url };
-							[[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
-						}
+						NSUserNotification* notification = [NSUserNotification new];
+						notification.title           = @"Crash Report Sent";
+						notification.informativeText = @"Diagnostic information has been sent to MacroMates.com regarding your last crash.";
+						notification.userInfo        = @{ @"path" : path, @"url" : url };
+						[[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
 					}
 				}
 

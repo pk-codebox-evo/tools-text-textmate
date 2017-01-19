@@ -1,6 +1,7 @@
 #import "FFFolderMenu.h"
 #import <OakAppKit/NSMenuItem Additions.h>
 #import <OakAppKit/NSMenu Additions.h>
+#import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/NSString Additions.h>
 #import <io/io.h>
 #import <io/entries.h>
@@ -12,6 +13,9 @@ static NSMutableArray* FoldersAtPath (NSString* folder)
 {
 	ASSERT(folder && [folder length] > 0);
 	NSMutableArray* res = [NSMutableArray array];
+	BOOL isDirectory = NO;
+	if(![[NSFileManager defaultManager] fileExistsAtPath:folder isDirectory:&isDirectory] || isDirectory == NO)
+		return res;
 
 	std::string const startPath = to_s(folder);
 	for(auto entry : path::entries(startPath, "*"))
@@ -36,10 +40,10 @@ static NSMutableArray* FoldersAtPath (NSString* folder)
 }
 
 @implementation FFFolderMenu
-+ (FFFolderMenu*)sharedInstance
++ (instancetype)sharedInstance
 {
-	static FFFolderMenu* instance = [FFFolderMenu new];
-	return instance;
+	static FFFolderMenu* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 + (void)addFolderSubmenuToMenuItem:(NSMenuItem*)aMenuItem
@@ -59,11 +63,11 @@ static NSMutableArray* FoldersAtPath (NSString* folder)
 	if([aMenu numberOfItems] != 0 || !parentItem)
 		return;
 
-	NSString* folder = [parentItem representedObject];
+	NSString* folder = [parentItem representedObject] ?: NSHomeDirectory();
 	if([parentItem parentItem] == nil) // root menu, show parent folders
 	{
 		BOOL hasSubfolders = [FoldersAtPath(folder) count];
-		for(NSString* path = folder; true; path = [path stringByDeletingLastPathComponent])
+		for(NSString* path = folder; OakNotEmptyString(path); path = [path stringByDeletingLastPathComponent])
 		{
 			NSMenuItem* menuItem = [aMenu addItemWithTitle:[[NSFileManager defaultManager] displayNameAtPath:path] action:parentItem.action keyEquivalent:@""];
 			[menuItem setTarget:parentItem.target];

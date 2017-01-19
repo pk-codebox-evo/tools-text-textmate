@@ -154,12 +154,14 @@
 	{
 		{ "@" + utf8::to_s(NSLeftArrowFunctionKey),  @selector(goBack:)                   },
 		{ "@" + utf8::to_s(NSRightArrowFunctionKey), @selector(goForward:)                },
+		{ utf8::to_s(NSCarriageReturnCharacter),     @selector(performEditSelectedRow:)   },
+		{ utf8::to_s(NSEnterCharacter),              @selector(performEditSelectedRow:)   },
 		{ "@" + utf8::to_s(NSDownArrowFunctionKey),  @selector(performDoubleClick:)       },
+		{ "~" + utf8::to_s(NSF2FunctionKey),         @selector(showContextMenu:)          },
 		{ "@o",                                      @selector(performDoubleClick:)       },
 		{ "@d",                                      @selector(duplicateSelectedEntries:) },
 		{ "@G",                                      @selector(orderFrontGoToFolder:)     },
 		{ " ",                                       @selector(toggleQuickLookPreview:)   },
-		{ "~\uF705",                                 @selector(showContextMenu:)          },
 	};
 
 	std::string const key = to_s(theEvent);
@@ -193,8 +195,5 @@
 	if(self.draggedOFBItems && [self.dataSource respondsToSelector:@selector(outlineView:draggedItems:endedWithOperation:)])
 		[(id <FSDataSourceDragSource>)self.dataSource outlineView:self draggedItems:self.draggedOFBItems endedWithOperation:aDragOperation];
 	self.draggedOFBItems = nil;
-
-	if([NSOutlineView respondsToSelector:@selector(draggedImage:endedAt:operation:)])
-		[super draggedImage:anImage endedAt:aPoint operation:aDragOperation];
 }
 @end

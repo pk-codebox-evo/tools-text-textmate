@@ -8,8 +8,7 @@ PUBLIC @interface OakTabItem : NSObject
 @property (nonatomic) NSString* title;
 @property (nonatomic) NSString* path;
 @property (nonatomic) NSString* identifier;
-@property (nonatomic) BOOL modified;
-@property (nonatomic) BOOL sticky;
+@property (nonatomic, getter = isModified) BOOL modified;
 @end
 
 @protocol OakTabBarViewDelegate, OakTabBarViewDataSource;
@@ -40,7 +39,7 @@ PUBLIC @interface OakTabBarView : OakBackgroundFillView
 - (BOOL)performDropOfTabItem:(OakTabItem*)tabItem fromTabBar:(OakTabBarView*)sourceTabBar index:(NSUInteger)dragIndex toTabBar:(OakTabBarView*)destTabBar index:(NSUInteger)droppedIndex operation:(NSDragOperation)operation;
 
 - (void)performCloseTab:(OakTabBarView*)sender;
-- (void)performCloseOtherTabs:(OakTabBarView*)sender;
+- (void)performCloseOtherTabsXYZ:(OakTabBarView*)sender;
 @end
 
 @protocol OakTabBarViewDataSource <NSObject>

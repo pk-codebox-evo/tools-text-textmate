@@ -1,8 +1,8 @@
 #import "OakDebug.h"
-#import "OakDebugMenu.h"
 #import <oak/oak.h>
 #import <malloc/malloc.h>
 
+#ifndef NDEBUG
 namespace
 {
 	struct MiB_t
@@ -49,17 +49,16 @@ namespace
 	};
 }
 
+@interface OakDebugMenu : NSObject { }
+@end
+
 @implementation OakDebugMenu
 + (void)load
 {
 	@autoreleasepool {
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(installDebugMenu:) name:NSApplicationDidFinishLaunchingNotification object:NSApp];
-
-		if(NSArray* debugEnabled = [[NSUserDefaults standardUserDefaults] arrayForKey:@"OakDebug Enabled"])
-		{
-			for(NSString* flag in debugEnabled)
-				OakDebugBaseClass::registry()[[flag UTF8String]] = true;
-		}
+		for(NSString* flag in [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OakDebug Enabled"])
+			OakDebugBaseClass::registry()[[flag UTF8String]] = true;
 	}
 }
 
@@ -153,3 +152,4 @@ namespace
 	[[NSApp mainMenu] addItem:menuItem];
 }
 @end
+#endif

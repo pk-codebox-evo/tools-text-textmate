@@ -1,6 +1,7 @@
 #import "OakTextView.h"
 #import "OakChoiceMenu.h"
 #import "OakDocumentView.h" // addAuxiliaryView:atEdge: signature
+#import "OakCommandRefresh.h"
 #import "LiveSearchView.h"
 #import "OTVHUD.h"
 #import <OakCommand/OakCommand.h>
@@ -14,7 +15,6 @@
 #import <OakFoundation/NSString Additions.h>
 #import <OakFoundation/OakFoundation.h>
 #import <OakFoundation/OakFindProtocol.h>
-#import <OakFoundation/OakTimer.h>
 #import <OakSystem/application.h>
 #import <crash/info.h>
 #import <buffer/indexed_map.h>
@@ -24,8 +24,8 @@
 #import <bundles/bundles.h>
 #import <cf/cf.h>
 #import <command/runner.h>
-#import <document/collection.h>
 #import <document/OakDocumentEditor.h>
+#import <document/OakDocumentController.h>
 #import <file/type.h>
 #import <layout/layout.h>
 #import <ns/ns.h>
@@ -38,6 +38,7 @@
 #import <text/utf8.h>
 #import <settings/settings.h>
 #import <oak/debug.h>
+#import <editor/editor.h>
 #import <editor/write.h>
 #import <io/exec.h>
 
@@ -239,7 +240,7 @@ typedef NS_ENUM(NSUInteger, OakFlagsState) {
 
 struct document_view_t : ng::buffer_api_t
 {
-	document_view_t (OakDocument* document, std::string const& scopeAttributes, bool scrollPastEnd, NSInteger fontScaleFactor = 100) : _document(document)
+	document_view_t (OakDocument* document, std::string const& scopeAttributes, bool scrollPastEnd, CGFloat fontScaleFactor = 1) : _document(document)
 	{
 		_document_editor = [OakDocumentEditor documentEditorWithDocument:document fontScaleFactor:fontScaleFactor];
 
@@ -252,17 +253,14 @@ struct document_view_t : ng::buffer_api_t
 		invisibles_map = settings.get(kSettingsInvisiblesMapKey, "");
 	}
 
-	~document_view_t ()
-	{
-		if(nest_count != 0)
-			end_undo_group();
-	}
+	bool begin_change_grouping ()                 { return [_document_editor beginChangeGrouping]; }
+	bool end_change_grouping ()                   { return [_document_editor endChangeGrouping]; }
 
 	NSFont* font () const                         { return _document_editor.font; }
 	void set_font (NSFont* newFont)               { _document_editor.font = newFont; }
 
-	NSInteger font_scale_factor () const          { return _document_editor.fontScaleFactor; }
-	void set_font_scale_factor (NSInteger scale)  { _document_editor.fontScaleFactor = scale; }
+	CGFloat font_scale_factor () const            { return _document_editor.fontScaleFactor; }
+	void set_font_scale_factor (CGFloat scale)    { _document_editor.fontScaleFactor = scale; }
 
 	void set_command_runner (std::function<void(bundle_command_t const&, ng::buffer_api_t const&, ng::ranges_t const&, std::map<std::string, std::string> const&)> const& runner)
 	{
@@ -276,15 +274,68 @@ struct document_view_t : ng::buffer_api_t
 		return res;
 	}
 
-	size_t nest_count = 0;
+	std::string symbol () const
+	{
+		ng::buffer_t const& buf = [_document_editor buffer];
+		return buf.symbol_at(ranges().last().first.index);
+	}
+
+	bool has_marks (std::string const& type = NULL_STR) const
+	{
+		return [_document_editor buffer].prev_mark(SIZE_T_MAX, type).second != NULL_STR;
+	}
+
+	bool current_line_has_marks (std::string const& type) const
+	{
+		ng::buffer_t const& buf = [_document_editor buffer];
+		size_t n = buf.convert(ranges().last().max().index).line;
+		return !buf.get_marks(buf.begin(n), buf.eol(n), type).empty();
+	}
+
+	void jump_to_next_bookmark (std::string const& type = NULL_STR)
+	{
+		std::pair<size_t, std::string> const& pair = [_document_editor buffer].next_mark(ranges().last().max().index, type);
+		if(pair.second != NULL_STR)
+			set_ranges(ng::index_t(pair.first));
+	}
+
+	void jump_to_previous_bookmark (std::string const& type = NULL_STR)
+	{
+		std::pair<size_t, std::string> const& pair = [_document_editor buffer].prev_mark(ranges().last().max().index, type);
+		if(pair.second != NULL_STR)
+			set_ranges(ng::index_t(pair.first));
+	}
+
+	void toggle_current_bookmark ()
+	{
+		ng::buffer_t& buf = [_document_editor buffer];
+		size_t n = buf.convert(ranges().last().max().index).line;
+
+		std::vector<size_t> toRemove;
+		for(auto const& pair : buf.get_marks(buf.begin(n), buf.eol(n), to_s(OakDocumentBookmarkIdentifier)))
+			toRemove.push_back(pair.first);
+
+		if(toRemove.empty())
+		{
+			buf.set_mark(ranges().last().max().index, to_s(OakDocumentBookmarkIdentifier));
+		}
+		else
+		{
+			for(auto const& index : toRemove)
+				buf.remove_mark(index, to_s(OakDocumentBookmarkIdentifier));
+		}
+		[[NSNotificationCenter defaultCenter] postNotificationName:OakDocumentMarksDidChangeNotification object:_document];
+	}
+
 	std::string invisibles_map;
 
 	// ============
 	// = Document =
 	// ============
 
-	oak::uuid_t identifier () const                 { return to_s(_document.identifier.UUIDString); }
+	oak::uuid_t identifier () const                 { return to_s(_document.identifier); }
 	std::string path () const                       { return to_s(_document.path); }
+	std::string directory () const                  { return to_s(_document.directory); }
 	std::string virtual_path () const               { return to_s(_document.virtualPath); }
 	std::string logical_path () const               { return to_s(_document.virtualPath ?: _document.path); }
 	std::string file_type () const                  { return to_s(_document.fileType); }
@@ -331,8 +382,6 @@ struct document_view_t : ng::buffer_api_t
 
 	bool can_undo () const { return _document.canUndo; }
 	bool can_redo () const { return _document.canRedo; }
-	void begin_undo_group () { [_document beginUndoGrouping]; }
-	void end_undo_group () { [_document endUndoGrouping]; }
 	void undo () { [_document undo]; }
 	void redo () { [_document redo]; }
 
@@ -416,7 +465,6 @@ private:
 {
 	OBJC_WATCH_LEAKS(OakTextView);
 
-	OakDocument* _document;
 	std::shared_ptr<document_view_t> documentView;
 	ng::callback_t* callback;
 
@@ -472,6 +520,7 @@ private:
 - (void)updateChoiceMenu:(id)sender;
 - (void)resetBlinkCaretTimer;
 - (void)updateSelection;
+- (void)updateSymbol;
 - (void)updateMarkedRanges;
 - (void)redisplayFrom:(size_t)from to:(size_t)to;
 - (NSImage*)imageForRanges:(ng::ranges_t const&)ranges imageRect:(NSRect*)outRect;
@@ -479,8 +528,8 @@ private:
 @property (nonatomic) NSDate* lastFlagsChangeDate;
 @property (nonatomic) NSUInteger lastFlags;
 @property (nonatomic) OakFlagsState flagsState;
-@property (nonatomic) OakTimer* initiateDragTimer;
-@property (nonatomic) OakTimer* dragScrollTimer;
+@property (nonatomic) NSTimer* initiateDragTimer;
+@property (nonatomic) NSTimer* dragScrollTimer;
 @property (nonatomic) BOOL showDragCursor;
 @property (nonatomic) BOOL showColumnSelectionCursor;
 @property (nonatomic) OakChoiceMenu* choiceMenu;
@@ -490,6 +539,8 @@ private:
 @property (nonatomic, readonly) links_ptr links;
 @property (nonatomic) NSDictionary* matchCaptures; // Captures from last regexp match
 @property (nonatomic) BOOL needsEnsureSelectionIsInVisibleArea;
+@property (nonatomic, readwrite) NSString* symbol;
+@property (nonatomic) scm::status::type scmStatus;
 @end
 
 static std::vector<bundles::item_ptr> items_for_tab_expansion (std::shared_ptr<document_view_t> const& documentView, ng::ranges_t const& ranges, std::string const& scopeAttributes, ng::range_t* range)
@@ -537,11 +588,10 @@ struct refresh_helper_t
 {
 	refresh_helper_t (OakTextView* self, std::shared_ptr<document_view_t> const& documentView) : _self(self), _document_view(documentView)
 	{
-		if(++documentView->nest_count == 1)
+		if(documentView->begin_change_grouping())
 		{
 			_revision  = documentView->revision();
 			_selection = documentView->ranges();
-			documentView->begin_undo_group();
 			documentView->begin_refresh_cycle(merge(_selection, [_self markedRanges]), [_self liveSearchRanges]);
 		}
 	}
@@ -550,9 +600,8 @@ struct refresh_helper_t
 	{
 		if(auto documentView = _document_view.lock())
 		{
-			if(--documentView->nest_count == 0)
+			if(documentView->end_change_grouping())
 			{
-				documentView->end_undo_group();
 				if(_revision == documentView->revision())
 				{
 					for(auto const& range : ng::highlight_ranges_for_movement(*documentView, _selection, documentView->ranges()))
@@ -560,7 +609,7 @@ struct refresh_helper_t
 						NSRect imageRect;
 						NSImage* image = [_self imageForRanges:range imageRect:&imageRect];
 						imageRect = [[_self window] convertRectToScreen:[_self convertRect:imageRect toView:nil]];
-						OakShowPopOutAnimation(imageRect, image);
+						OakShowPopOutAnimation(_self, imageRect, image);
 					}
 				}
 
@@ -568,6 +617,7 @@ struct refresh_helper_t
 				{
 					[_self updateMarkedRanges];
 					[_self updateSelection];
+					[_self updateSymbol];
 				}
 
 				auto damagedRects = documentView->end_refresh_cycle(merge(documentView->ranges(), [_self markedRanges]), [_self visibleRect], [_self liveSearchRanges]);
@@ -700,7 +750,7 @@ static std::string shell_quote (std::vector<std::string> paths)
 {
 	NSRect srcRect = NSZeroRect, visibleRect = [self visibleRect];
 	for(auto const& range : ranges)
-		srcRect = NSUnionRect(srcRect, NSIntersectionRect(visibleRect, documentView->rect_for_range(range.min().index, range.max().index)));
+		srcRect = NSUnionRect(srcRect, NSIntersectionRect(visibleRect, documentView->rect_for_range(range.min().index, range.max().index, true)));
 
 	NSBezierPath* clip = [NSBezierPath bezierPath];
 	for(auto const& rect : documentView->rects_for_ranges(ranges))
@@ -733,12 +783,14 @@ static std::string shell_quote (std::vector<std::string> paths)
 		documentView->remove_enclosing_folds(range.min().index, range.max().index);
 	[self ensureSelectionIsInVisibleArea:self];
 
+	BOOL firstRange = YES;
 	for(auto const& range : ranges)
 	{
 		NSRect imageRect;
 		NSImage* image = [self imageForRanges:range imageRect:&imageRect];
 		imageRect = [[self window] convertRectToScreen:[self convertRect:imageRect toView:nil]];
-		OakShowPopOutAnimation(imageRect, image);
+		OakShowPopOutAnimation(self, imageRect, image, firstRange);
+		firstRange = NO;
 	}
 }
 
@@ -766,9 +818,9 @@ static std::string shell_quote (std::vector<std::string> paths)
 		_document.visibleIndex = documentView->index_at_point([self visibleRect].origin);
 }
 
-- (void)setDocument:(document::document_ptr const&)aDocument
+- (void)setDocument:(OakDocument*)aDocument
 {
-	if(aDocument && [_document isEqual:aDocument->document()])
+	if(aDocument && [_document isEqual:aDocument])
 	{
 		if(_document.selection)
 		{
@@ -779,12 +831,13 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 			[self ensureSelectionIsInVisibleArea:self];
 			[self updateSelection];
+			[self updateSymbol];
 		}
 		[self resetBlinkCaretTimer];
 		return;
 	}
 
-	NSInteger fontScaleFactor = 100;
+	CGFloat fontScaleFactor = 1;
 	if(documentView)
 	{
 		fontScaleFactor = documentView->font_scale_factor();
@@ -809,7 +862,7 @@ static std::string shell_quote (std::vector<std::string> paths)
 		documentView.reset();
 	}
 
-	if(_document = aDocument ? aDocument->document() : nil)
+	if(_document = aDocument)
 	{
 		documentView = std::make_shared<document_view_t>(_document, to_s(self.scopeAttributes), self.scrollPastEnd, fontScaleFactor);
 		documentView->set_command_runner([self](bundle_command_t const& cmd, ng::buffer_api_t const& buffer, ng::ranges_t const& selection, std::map<std::string, std::string> const& variables){
@@ -856,6 +909,7 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 		[self reflectDocumentSize];
 		[self updateSelection];
+		[self updateSymbol];
 
 		if(visibleIndex && visibleIndex.index < documentView->size())
 				[self scrollIndexToFirstVisible:visibleIndex];
@@ -895,15 +949,34 @@ static std::string shell_quote (std::vector<std::string> paths)
 
 		[self registerForDraggedTypes:[[self class] dropTypes]];
 
+		[self bind:@"scmStatus" toObject:self withKeyPath:@"document.scmStatus" options:nil];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(userDefaultsDidChange:) name:NSUserDefaultsDidChangeNotification object:[NSUserDefaults standardUserDefaults]];
 	}
 	return self;
 }
 
+- (void)setScmStatus:(scm::status::type)newStatus
+{
+	if(_scmStatus == newStatus)
+		return;
+
+	_scmStatus = newStatus;
+	for(auto const& item : bundles::query(bundles::kFieldSemanticClass, "callback.document.did-change-scm-status", [self scopeContext], bundles::kItemTypeMost, oak::uuid_t(), false))
+		[self performBundleItem:item];
+}
+
+- (void)setNilValueForKey:(NSString*)key
+{
+	// scmStatus can be nil because we bind to self.document.scmStatus
+	if(![key isEqualToString:@"scmStatus"])
+		[super setNilValueForKey:key];
+}
+
 - (void)dealloc
 {
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
-	[self setDocument:document::document_ptr()];
+	[self unbind:@"scmStatus"];
+	[self setDocument:nil];
 }
 
 - (void)documentWillSave:(NSNotification*)aNotification
@@ -1047,6 +1120,7 @@ doScroll:
 	if(!choiceVector.empty())
 	{
 		_choiceMenu = [OakChoiceMenu new];
+		_choiceMenu.font = [NSFont fontWithName:self.font.fontName size:self.font.pointSize * documentView->font_scale_factor()];
 		_choiceMenu.choices = (__bridge NSArray*)((CFArrayRef)cf::wrap(choiceVector));
 
 		std::string const& currentChoice = documentView->placeholder_content();
@@ -1066,7 +1140,7 @@ doScroll:
 
 + (BOOL)isCompatibleWithResponsiveScrolling
 {
-	return NO;
+	return [[NSUserDefaults standardUserDefaults] boolForKey:@"enableResponsiveScroll"];
 }
 
 - (BOOL)acceptsFirstResponder       { return YES; }
@@ -1771,14 +1845,14 @@ doScroll:
 
 - (void)performBundleItem:(bundles::item_ptr)item
 {
-	crash_reporter_info_t info(text::format("%s %s", sel_getName(_cmd), item->name_with_bundle().c_str()));
+	crash_reporter_info_t info("%s %s", sel_getName(_cmd), item->name_with_bundle().c_str());
 	// D(DBF_OakTextView_BundleItems, bug("%s\n", anItem->name_with_bundle().c_str()););
-	AUTO_REFRESH;
 	switch(item->kind())
 	{
 		case bundles::kItemTypeSnippet:
 		{
 			[self recordSelector:@selector(insertSnippetWithOptions:) withArgument:ns::to_dictionary(item->plist())];
+			AUTO_REFRESH;
 			documentView->snippet_dispatch(item->plist(), [self variablesForBundleItem:item]);
 		}
 		break;
@@ -1796,6 +1870,7 @@ doScroll:
 		case bundles::kItemTypeMacro:
 		{
 			[self recordSelector:@selector(playMacroWithOptions:) withArgument:ns::to_dictionary(item->plist())];
+			AUTO_REFRESH;
 			documentView->macro_dispatch(item->plist(), [self variablesForBundleItem:item]);
 		}
 		break;
@@ -2044,7 +2119,7 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 - (void)keyDown:(NSEvent*)anEvent
 {
 	D(DBF_OakTextView_TextInput, bug("%s\n", [[anEvent description] UTF8String]););
-	crash_reporter_info_t info(text::format("%s %s", sel_getName(_cmd), to_s(anEvent).c_str()));
+	crash_reporter_info_t info("%s %s", sel_getName(_cmd), to_s(anEvent).c_str());
 	try {
 		[self realKeyDown:anEvent];
 	}
@@ -2547,19 +2622,19 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 						// ====================================================
 
 						NSDictionary* info = [documents objectAtIndex:(i + ((options & find::backwards) ? [documents count] - 1 : 1)) % [documents count]];
-						document::document_ptr doc;
-						if(NSString* path = [info objectForKey:@"path"])
-							doc = document::create(to_s(path));
-						else if(NSString* identifier = [info objectForKey:@"identifier"])
-							doc = document::find(to_s(identifier));
+						OakDocument* doc;
+						if(NSString* path = info[@"path"])
+							doc = [OakDocumentController.sharedInstance documentWithPath:path];
+						else if(NSString* identifier = info[@"identifier"])
+							doc = [OakDocumentController.sharedInstance findDocumentWithIdentifier:[[NSUUID alloc] initWithUUIDString:identifier]];
 
 						if(doc)
 						{
-							if(!doc->is_open())
-								doc->set_recent_tracking(false);
+							if(!doc.isOpen)
+								doc.recentTrackingDisabled = YES;
 
 							NSString* range = [info objectForKey:(options & find::backwards) ? @"lastMatchRange" : @"firstMatchRange"];
-							document::show(doc, document::kCollectionAny, to_s(range));
+							[OakDocumentController.sharedInstance showDocument:doc andSelect:to_s(range) inProject:nil bringToFront:YES];
 							return;
 						}
 					}
@@ -2593,6 +2668,15 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 							captures[[NSString stringWithCxxString:pair.first]] = [NSString stringWithCxxString:pair.second];
 						self.matchCaptures = captures;
 					}
+				}
+
+				// If wrap_around is enabled but the only result is already selected, highlight it again.
+				if(newSelection.empty() && (options & find::wrap_around) && alreadySelected.size() == 1)
+				{
+					auto selection = *alreadySelected.begin();
+					auto tmp = ng::find_all(*documentView, findStr, options, { selection });
+					if(tmp.size() == 1 && tmp.begin()->first.sorted() == selection)
+						newSelection.push_back(selection);
 				}
 
 				[self highlightRanges:newSelection];
@@ -2757,6 +2841,51 @@ static void update_menu_key_equivalents (NSMenu* menu, std::multimap<std::string
 - (IBAction)replaceAll:(id)sender                     { [self recordSelector:_cmd andPerform:kFindOperationReplaceAll            withOptions:find::all_matches]; }
 - (IBAction)replaceAllInSelection:(id)sender          { [self recordSelector:_cmd andPerform:kFindOperationReplaceAllInSelection withOptions:find::all_matches]; }
 
+// ============================
+// = Bookmark Related Actions =
+// ============================
+
+- (IBAction)toggleCurrentBookmark:(id)sender
+{
+	if(!documentView)
+		return;
+	documentView->toggle_current_bookmark();
+}
+
+- (IBAction)goToNextBookmark:(id)sender
+{
+	if(!documentView)
+		return;
+	AUTO_REFRESH;
+	documentView->jump_to_next_bookmark(to_s(OakDocumentBookmarkIdentifier));
+}
+
+- (IBAction)goToPreviousBookmark:(id)sender
+{
+	if(!documentView)
+		return;
+	AUTO_REFRESH;
+	documentView->jump_to_previous_bookmark(to_s(OakDocumentBookmarkIdentifier));
+}
+
+- (IBAction)jumpToNextMark:(id)sender
+{
+	if(!documentView)
+		return;
+	AUTO_REFRESH;
+	documentView->jump_to_next_bookmark();
+}
+
+- (IBAction)jumpToPreviousMark:(id)sender
+{
+	if(!documentView)
+		return;
+	AUTO_REFRESH;
+	documentView->jump_to_previous_bookmark();
+}
+
+// ============================
+
 - (void)insertSnippetWithOptions:(NSDictionary*)someOptions // For Dialog popup
 {
 	AUTO_REFRESH;
@@ -2816,15 +2945,15 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 	[aMenuItem updateTitle:[NSString stringWithCxxString:format_string::replace(to_s(title), "\\b(\\w+) / (Selection)\\b", [self hasSelection] ? "$2" : "$1")]];
 
 	if([aMenuItem action] == @selector(cut:))
-		[aMenuItem setTitle:@"Cut"];
+		[aMenuItem setDynamicTitle:@"Cut"];
 	else if([aMenuItem action] == @selector(copy:))
-		[aMenuItem setTitle:@"Copy"];
+		[aMenuItem setDynamicTitle:@"Copy"];
 
 	static auto const RequiresSelection = new std::set<SEL>{ @selector(cut:), @selector(copy:), @selector(delete:), @selector(copySelectionToFindPboard:) };
 	if(RequiresSelection->find([aMenuItem action]) != RequiresSelection->end())
 		return [self hasSelection];
 	else if([aMenuItem action] == @selector(toggleMacroRecording:))
-		[aMenuItem setTitle:self.isMacroRecording ? @"Stop Recording" : @"Start Recording"];
+		[aMenuItem setTitle:self.isRecordingMacro ? @"Stop Recording" : @"Start Recording"];
 	else if([aMenuItem action] == @selector(toggleShowInvisibles:))
 		[aMenuItem setTitle:self.showInvisibles ? @"Hide Invisible Characters" : @"Show Invisible Characters"];
 	else if([aMenuItem action] == @selector(toggleSoftWrap:))
@@ -2850,6 +2979,30 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 	{
 		[aMenuItem setTitle:@"Redo"];
 		return documentView->can_redo();
+	}
+	else if([aMenuItem action] == @selector(toggleCurrentBookmark:))
+		[aMenuItem setTitle:documentView && documentView->current_line_has_marks(to_s(OakDocumentBookmarkIdentifier)) ? @"Remove Bookmark" : @"Set Bookmark"];
+	else if([aMenuItem action] == @selector(goToNextBookmark:) || [aMenuItem action] == @selector(goToPreviousBookmark:))
+		return documentView && documentView->has_marks(to_s(OakDocumentBookmarkIdentifier));
+	else if([aMenuItem action] == @selector(jumpToNextMark:) || [aMenuItem action] == @selector(jumpToPreviousMark:))
+		return documentView && documentView->has_marks();
+	else if([aMenuItem action] == @selector(performBundleItemWithUUIDStringFrom:))
+	{
+		if(bundles::item_ptr bundleItem = bundles::lookup(to_s(aMenuItem.representedObject)))
+		{
+			std::string name = bundleItem->name();
+			if(regexp::match_t const m = regexp::search("^(\\w+) / (\\w+) (.*)", name))
+			{
+				auto command = parse_command(bundleItem);
+				if(command.auto_refresh != auto_refresh::never)
+				{
+					BOOL shouldTeardown = NO;
+					if(OakCommandRefresher* refresher = [self existingRefresherForCommand:command])
+						shouldTeardown = !refresher.command.htmlOutputView;
+					[aMenuItem updateTitle:to_ns(format_string::expand(shouldTeardown ? "$2 $3" : "$1 $3", m.captures()))];
+				}
+			}
+		}
 	}
 	return YES;
 }
@@ -2912,7 +3065,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 
 - (theme_ptr)theme            { return documentView ? documentView->theme() : theme_ptr(); }
 - (NSFont*)font               { return documentView ? documentView->font() : [NSFont userFixedPitchFontOfSize:0]; }
-- (NSInteger)fontScaleFactor  { return documentView ? documentView->font_scale_factor() : 100; }
+- (CGFloat)fontScaleFactor    { return documentView ? documentView->font_scale_factor() : 1; }
 - (size_t)tabSize             { return documentView ? documentView->tab_size() : 2; }
 - (BOOL)softTabs              { return documentView ? documentView->soft_tabs() : NO; }
 - (BOOL)softWrap              { return documentView && documentView->soft_wrap(); }
@@ -2953,7 +3106,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 	}
 }
 
-- (void)setFontScaleFactor:(NSInteger)newFontScaleFactor
+- (void)setFontScaleFactor:(CGFloat)newFontScaleFactor
 {
 	if(documentView)
 	{
@@ -2963,7 +3116,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 		[self scrollIndexToFirstVisible:documentView->begin(documentView->convert(visibleIndex.index).line)];
 	}
 
-	[OTVHUD showHudForView:self withText:[NSString stringWithFormat:@"%ld%%", newFontScaleFactor]];
+	[OTVHUD showHudForView:self withText:[NSString stringWithFormat:@"%.f%%", newFontScaleFactor * 100]];
 }
 
 - (void)setTabSize:(size_t)newTabSize
@@ -3238,6 +3391,13 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 	isUpdatingSelection = NO;
 }
 
+- (void)updateSymbol
+{
+	NSString* newSymbol = to_ns(documentView->symbol());
+	if(![_symbol isEqualToString:newSymbol])
+		self.symbol = newSymbol;
+}
+
 - (folding_state_t)foldingStateForLine:(NSUInteger)lineNumber
 {
 	if(documentView)
@@ -3292,12 +3452,12 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 // = Macro Recording =
 // ===================
 
-- (BOOL)isMacroRecording                    { return macroRecordingArray != nil; }
-- (IBAction)toggleMacroRecording:(id)sender { self.isMacroRecording = !self.isMacroRecording; }
+- (BOOL)isRecordingMacro                    { return macroRecordingArray != nil; }
+- (IBAction)toggleMacroRecording:(id)sender { self.recordingMacro = !self.isRecordingMacro; }
 
-- (void)setIsMacroRecording:(BOOL)flag
+- (void)setRecordingMacro:(BOOL)flag
 {
-	if(self.isMacroRecording == flag)
+	if(self.isRecordingMacro == flag)
 		return;
 
 	D(DBF_OakTextView_Macros, bug("%s\n", BSTR(flag)););
@@ -3428,7 +3588,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 		};
 
 		auto env = handler->bundle_variables();
-		auto const pwd = format_string::expand("${TM_DIRECTORY:-${TM_PROJECT_DIRECTORY:-$TMPDIR}}", env);
+		auto const pwd = documentView->path() != NULL_STR ? path::parent(documentView->path()) : documentView->directory();
 
 		std::vector<std::string> files, paths = handlerToFiles[handler->uuid()];
 		std::transform(paths.begin(), paths.end(), back_inserter(files), [&pwd](std::string const& path){ return path::relative_to(path, pwd); });
@@ -3535,7 +3695,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 	BOOL shouldLink       = ([info draggingSource] != self) && ([info draggingSourceOperationMask] == NSDragOperationLink);
 
 	D(DBF_OakTextView_DragNDrop, bug("local %s, should move %s, type %s, all types %s\n", BSTR([info draggingSource] == self), BSTR(shouldMove), [type UTF8String], [[types description] UTF8String]););
-	crash_reporter_info_t crashInfo(text::format("local %s, should move %s, type %s, all types %s", BSTR([info draggingSource] == self), BSTR(shouldMove), [type UTF8String], [[types description] UTF8String]));
+	crash_reporter_info_t crashInfo("local %s, should move %s, type %s, all types %s", BSTR([info draggingSource] == self), BSTR(shouldMove), [type UTF8String], [[types description] UTF8String]);
 
 	AUTO_REFRESH;
 	ng::index_t pos = dropPosition;
@@ -3772,7 +3932,7 @@ static char const* kOakMenuItemTitle = "OakMenuItemTitle";
 - (void)preparePotentialDrag:(NSEvent*)anEvent
 {
 	if([self dragDelay] != 0 && ([[self window] isKeyWindow] || ([anEvent modifierFlags] & NSCommandKeyMask)))
-			self.initiateDragTimer = [OakTimer scheduledTimerWithTimeInterval:(0.001 * [self dragDelay]) target:self selector:@selector(changeToDragPointer:) repeats:NO];
+			self.initiateDragTimer = [NSTimer scheduledTimerWithTimeInterval:(0.001 * [self dragDelay]) target:self selector:@selector(changeToDragPointer:) userInfo:nil repeats:NO];
 	else	[self changeToDragPointer:nil];
 	delayMouseDown = [[self window] isKeyWindow];
 }
@@ -3843,11 +4003,19 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 	{
 		NSInteger choice = NSRunAlertPanel(@"You are recording a macro", @"While recording macros it is not possible to select text or reposition the caret using your mouse.", @"Continue", @"Stop Recording", nil);
 		if(choice == NSAlertAlternateReturn) // "Stop Macro Recording"
-			self.isMacroRecording = NO;
+			self.recordingMacro = NO;
 		return;
 	}
 
-	std::vector<bundles::item_ptr> const& items = bundles::query(bundles::kFieldSemanticClass, "callback.mouse-click", add_modifiers_to_scope(ng::scope(*documentView, documentView->index_at_point([self convertPoint:[anEvent locationInWindow] fromView:nil]), to_s([self scopeAttributes])), [anEvent modifierFlags]));
+	std::string callbackName;
+	switch(([anEvent clickCount]-1) % 3)
+	{
+		case 0: callbackName = "callback.single-click"; break;
+		case 1: callbackName = "callback.double-click"; break;
+		case 2: callbackName = "callback.triple-click"; break;
+	}
+
+	std::vector<bundles::item_ptr> const& items = bundles::query(bundles::kFieldSemanticClass, callbackName, add_modifiers_to_scope(ng::scope(*documentView, documentView->index_at_point([self convertPoint:[anEvent locationInWindow] fromView:nil]), to_s([self scopeAttributes])), [anEvent modifierFlags]));
 	if(!items.empty())
 	{
 		if(bundles::item_ptr item = OakShowMenuForBundleItems(items, [self positionForWindowUnderCaret]))
@@ -3889,6 +4057,7 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 	}
 	else if(_initiateDragTimer) // delayed reaction to mouseDown
 	{
+		[self.initiateDragTimer invalidate];
 		self.initiateDragTimer = nil;
 
 		AUTO_REFRESH;
@@ -3897,7 +4066,7 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 	else
 	{
 		if(!_dragScrollTimer && [self autoscroll:[NSApp currentEvent]] == YES)
-			self.dragScrollTimer = [OakTimer scheduledTimerWithTimeInterval:(1.0/25.0) target:self selector:@selector(dragScrollTimerFired:) repeats:YES];
+			self.dragScrollTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0/25.0) target:self selector:@selector(dragScrollTimerFired:) userInfo:nil repeats:YES];
 
 		AUTO_REFRESH;
 		[self actOnMouseDragged:anEvent];
@@ -3906,8 +4075,16 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 
 - (void)dragScrollTimerFired:(id)sender
 {
-	AUTO_REFRESH;
-	[self actOnMouseDragged:[NSApp currentEvent]];
+	if(([NSEvent pressedMouseButtons] & 1) && documentView)
+	{
+		AUTO_REFRESH;
+		[self actOnMouseDragged:[NSApp currentEvent]];
+	}
+	else
+	{
+		[_dragScrollTimer invalidate];
+		_dragScrollTimer = nil;
+	}
 }
 
 - (void)mouseUp:(NSEvent*)anEvent
@@ -3920,7 +4097,9 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 		[self actOnMouseDown];
 	delayMouseDown = NO;
 
+	[self.initiateDragTimer invalidate];
 	self.initiateDragTimer = nil;
+	[self.dragScrollTimer invalidate];
 	self.dragScrollTimer   = nil;
 	self.showDragCursor    = NO;
 }
@@ -3976,7 +4155,7 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 			self.needsEnsureSelectionIsInVisibleArea = YES;
 	}
 	catch(std::exception const& e) {
-		crash_reporter_info_t info(text::format("Performing @selector(%s)\nC++ Exception: %s", sel_getName(aSelector), e.what()));
+		crash_reporter_info_t info("Performing @selector(%s)\nC++ Exception: %s", sel_getName(aSelector), e.what());
 		abort();
 	}
 }
@@ -4159,23 +4338,87 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 // = Run Command =
 // ===============
 
+- (OakCommandRefresher*)existingRefresherForCommand:(bundle_command_t const&)aBundleCommand
+{
+	OakDocument* doc = aBundleCommand.auto_refresh & (auto_refresh::on_document_change|auto_refresh::on_document_close) ? _document : nil;
+	return [OakCommandRefresher findRefresherForCommandUUID:[[NSUUID alloc] initWithUUIDString:to_ns(aBundleCommand.uuid)] document:doc window:self.window];
+}
+
 - (void)executeBundleCommand:(bundle_command_t const&)aBundleCommand variables:(std::map<std::string, std::string> const&)initialVariables
 {
 	[self executeBundleCommand:aBundleCommand buffer:*documentView selection:documentView->ranges() variables:initialVariables];
 }
 
-- (void)executeBundleCommand:(bundle_command_t const&)aBundleCommand buffer:(ng::buffer_api_t const&)buffer selection:(ng::ranges_t const&)selection variables:(std::map<std::string, std::string> const&)initialVariables
+- (void)executeBundleCommand:(bundle_command_t)aBundleCommand buffer:(ng::buffer_api_t const&)buffer selection:(ng::ranges_t const&)selection variables:(std::map<std::string, std::string> const&)initialVariables
 {
+	if(OakCommandRefresher* refresher = [self existingRefresherForCommand:aBundleCommand])
+	{
+		if(refresher.command.htmlOutputView)
+				[refresher bringHTMLOutputToFront:self];
+		else	[refresher teardown];
+		return;
+	}
+
+	std::map<std::string, std::string> variables = initialVariables;
+
 	int stdinRead, stdinWrite;
 	std::tie(stdinRead, stdinWrite) = io::create_pipe();
 
-	std::map<std::string, std::string> variables = initialVariables;
 	bool inputWasSelection = false;
 	ng::ranges_t const inputRanges = ng::write_unit_to_fd(buffer, selection, buffer.indent().tab_size(), stdinWrite, aBundleCommand.input, aBundleCommand.input_fallback, aBundleCommand.input_format, aBundleCommand.scope_selector, variables, &inputWasSelection);
 
 	OakCommand* command = [[OakCommand alloc] initWithBundleCommand:aBundleCommand];
+
+	auto variablesByValue = initialVariables;
+
+	command.modalEventLoopRunner = ^(OakCommand* command, BOOL* didTerminate){
+		NSMutableArray* queuedEvents = [NSMutableArray array];
+		while(*didTerminate == NO)
+		{
+			// We use CFRunLoopRunInMode() to handle dispatch queues and nextEventMatchingMask:… to catcn ⌃C
+			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 5, true);
+			if(NSEvent* event = [NSApp nextEventMatchingMask:NSAnyEventMask untilDate:nil inMode:NSDefaultRunLoopMode dequeue:YES])
+			{
+				static NSEventType const events[] = { NSLeftMouseDown, NSLeftMouseUp, NSRightMouseDown, NSRightMouseUp, NSOtherMouseDown, NSOtherMouseUp, NSLeftMouseDragged, NSRightMouseDragged, NSOtherMouseDragged, NSKeyDown, NSKeyUp, NSFlagsChanged };
+				if(!oak::contains(std::begin(events), std::end(events), [event type]))
+				{
+					[NSApp sendEvent:event];
+				}
+				else if([event type] == NSKeyDown && (([[event charactersIgnoringModifiers] isEqualToString:@"c"] && ([event modifierFlags] & (NSShiftKeyMask|NSControlKeyMask|NSAlternateKeyMask|NSCommandKeyMask)) == NSControlKeyMask) || ([[event charactersIgnoringModifiers] isEqualToString:@"."] && ([event modifierFlags] & (NSShiftKeyMask|NSControlKeyMask|NSAlternateKeyMask|NSCommandKeyMask)) == NSCommandKeyMask)))
+				{
+					NSInteger choice = NSRunAlertPanel([NSString stringWithFormat:@"Stop “%@”", to_ns(aBundleCommand.name)], @"Would you like to kill the current shell command?", @"Kill Command", @"Cancel", nil);
+					if(choice == NSAlertDefaultReturn) // "Kill Command"
+						[command terminate];
+				}
+				else
+				{
+					[queuedEvents addObject:event];
+				}
+			}
+		}
+
+		for(NSEvent* event in queuedEvents)
+			[NSApp postEvent:event atStart:NO];
+	};
+
+	command.terminationHandler = ^(OakCommand* command, BOOL normalExit){
+		if(normalExit && aBundleCommand.auto_refresh != auto_refresh::never)
+		{
+			OakCommandRefresherOptions options = 0;
+			if(aBundleCommand.auto_refresh & auto_refresh::on_document_change)
+				options |= OakCommandRefresherDocumentDidChange;
+			if(aBundleCommand.auto_refresh & auto_refresh::on_document_save)
+				options |= OakCommandRefresherDocumentDidSave;
+			if(aBundleCommand.auto_refresh & auto_refresh::on_document_close)
+				options |= OakCommandRefresherDocumentDidClose;
+			if(aBundleCommand.input == input::entire_document)
+				options |= OakCommandRefresherDocumentAsInput;
+			[OakCommandRefresher scheduleRefreshForCommand:command document:_document window:self.window options:options variables:variables];
+		}
+	};
+
 	command.firstResponder = self;
-	[command executeWithInput:[[NSFileHandle alloc] initWithFileDescriptor:stdinRead closeOnDealloc:YES] variables:variables completionHandler:^(std::string const& out, output::type placement, output_format::type format, output_caret::type outputCaret, std::map<std::string, std::string> const& environment){
+	[command executeWithInput:[[NSFileHandle alloc] initWithFileDescriptor:stdinRead closeOnDealloc:YES] variables:variables outputHandler:^(std::string const& out, output::type placement, output_format::type format, output_caret::type outputCaret, std::map<std::string, std::string> const& environment){
 		if(outputCaret == output_caret::heuristic)
 		{
 			if(aBundleCommand.input == input::selection && inputWasSelection)
@@ -4200,9 +4443,6 @@ static scope::context_t add_modifiers_to_scope (scope::context_t scope, NSUInteg
 		AUTO_REFRESH;
 		documentView->handle_result(out, placement, format, outputCaret, inputRanges, environment);
 	}];
-
-	if(command.isAsyncCommand == NO)
-		[command waitUntilExit];
 }
 
 - (void)updateEnvironment:(std::map<std::string, std::string>&)res

@@ -1,7 +1,6 @@
 #include "settings.h"
 #include "parser.h"
 #include "track_paths.h"
-#include <OakSystem/application.h>
 #include <plist/plist.h>
 #include <oak/oak.h>
 #include <regexp/format_string.h>
@@ -64,10 +63,6 @@ namespace
 			if(cwd == path::home())
 				break;
 		}
-		if(global_settings_path() != NULL_STR)
-			res.push_back(global_settings_path());
-		if(default_settings_path() != NULL_STR)
-			res.push_back(default_settings_path());
 		std::reverse(res.begin(), res.end());
 		return res;
 	}
@@ -77,7 +72,7 @@ namespace
 		static std::string const RootScopes[] = { "text", "source", "attr" };
 		for(auto const& scope : RootScopes)
 		{
-			if(str.find(scope) == 0 && (str.size() == scope.size() || str.find_first_of("., ", scope.size()) == scope.size()))
+			if(str.compare(0, scope.size(), scope) == 0 && (str.size() == scope.size() || str.find_first_of("., ", scope.size()) == scope.size()))
 				return true;
 		}
 		return str == "";
@@ -174,6 +169,33 @@ namespace
 		}
 	}
 
+	static size_t const kGlob          = 1 << 0;
+	static size_t const kScopeSelector = 1 << 1;
+	static size_t const kUnscoped      = 1 << 2;
+
+	static void extract (std::string const& directory, std::string const& path, scope::scope_t const& scope, std::multimap<double, section_t const*>& orderScopeMatches, std::function<void(section_t::assignment_t const& assignment, section_t const& section)> filter, std::vector<section_t> const& sections, size_t sectionType)
+	{
+		for(auto const& section : sections)
+		{
+			if((sectionType & kScopeSelector) && section.has_scope_selector)
+			{
+				double rank = 0;
+				if(section.scope_selector.does_match(scope, &rank))
+					orderScopeMatches.emplace(rank, &section);
+			}
+			else if((sectionType & kGlob) && section.has_file_glob && section.file_glob.does_match(path == NULL_STR ? directory + "/" : path))
+			{
+				for(auto const& assignment : section.variables)
+					filter(assignment, section);
+			}
+			else if((sectionType & kUnscoped) && !section.has_scope_selector && !section.has_file_glob)
+			{
+				for(auto const& assignment : section.variables)
+					filter(assignment, section);
+			}
+		}
+	}
+
 	static void collect (std::string const& directory, std::string const& path, scope::scope_t const& scope, std::function<void(section_t::assignment_t const& assignment, section_t const& section)> filter)
 	{
 		D(DBF_Settings, bug("%s, %s, %s\n", directory.c_str(), path.c_str(), to_s(scope).c_str()););
@@ -182,39 +204,34 @@ namespace
 		std::lock_guard<std::mutex> lock(mutex);
 		sections(NULL_STR); // clear cache if too big
 
+		auto const globalSections  = sections(global_settings_path());
+		auto const defaultSections = sections(default_settings_path());
+
+		std::multimap<double, section_t const*> orderScopeMatches;
+		extract(directory, path, scope, orderScopeMatches, filter, defaultSections, kUnscoped|kScopeSelector);
+		extract(directory, path, scope, orderScopeMatches, filter, globalSections,  kUnscoped|kScopeSelector);
+		for(auto const& section : orderScopeMatches)
+		{
+			for(auto const& assignment : section.second->variables)
+				filter(assignment, *section.second);
+		}
+
+		extract(directory, path, scope, orderScopeMatches, filter, defaultSections, kGlob);
+		extract(directory, path, scope, orderScopeMatches, filter, globalSections,  kGlob);
+
 		for(auto const& file : paths(directory))
 		{
-			std::multimap<double, section_t const*> orderScopeMatches;
+			auto const& s = sections(file);
 
-			for(auto const& section : sections(file))
-			{
-				if(section.has_scope_selector)
-				{
-					double rank = 0;
-					if(section.scope_selector.does_match(scope, &rank))
-						orderScopeMatches.emplace(rank, &section);
-				}
-				else if(!section.has_file_glob)
-				{
-					for(auto const& assignment : section.variables)
-						filter(assignment, section);
-				}
-			}
-
+			orderScopeMatches.clear();
+			extract(directory, path, scope, orderScopeMatches, filter, s, kUnscoped|kScopeSelector);
 			for(auto const& section : orderScopeMatches)
 			{
 				for(auto const& assignment : section.second->variables)
 					filter(assignment, *section.second);
 			}
 
-			for(auto const& section : sections(file))
-			{
-				if(section.has_file_glob && section.file_glob.does_match(path == NULL_STR ? directory + "/" : path))
-				{
-					for(auto const& assignment : section.variables)
-						filter(assignment, section);
-				}
-			}
+			extract(directory, path, scope, orderScopeMatches, filter, s, kGlob);
 		}
 	}
 
@@ -355,7 +372,7 @@ void settings_t::set (std::string const& key, std::string const& value, std::str
 	ASSERT_NE(global_settings_path(), NULL_STR);
 
 	std::vector<std::string> sectionNames(fileType == NULL_STR ? 0 : 1, fileType);
-	if(fileType != NULL_STR && fileType.find("attr.") != 0)
+	if(fileType != NULL_STR && !oak::has_prefix(fileType, "attr."))
 	{
 		std::vector<std::string> parts = text::split(fileType, ".");
 		for(size_t i = 0; i < parts.size(); ++i)
@@ -370,31 +387,82 @@ void settings_t::set (std::string const& key, std::string const& value, std::str
 		sections[sectionName][key] = value;
 
 	auto defaults = read_file(default_settings_path());
+
+	struct ordered_section_t
+	{
+		ordered_section_t (std::string const& title) : title(title)
+		{
+			_is_top_level      = title.empty();
+			_is_scope_selector = !_is_top_level && is_scope_selector(title);
+			_is_wildcard       = !_is_top_level && !title.empty() && title.front() == '*';
+		}
+
+		struct assignment_t
+		{
+			assignment_t (std::string const& name, std::string const& value) : name(name), value(value) { }
+			std::string name;
+			std::string value;
+		};
+
+		bool operator< (ordered_section_t const& rhs) const
+		{
+			if(_is_top_level && rhs._is_top_level || _is_scope_selector && rhs._is_scope_selector)
+				return title < rhs.title;
+			else if(_is_top_level || rhs._is_scope_selector)
+				return true;
+			else if(rhs._is_top_level || _is_scope_selector)
+				return false;
+
+			size_t lhsSize = title.size() - (_is_wildcard ? 1 : 0);
+			size_t rhsSize = rhs.title.size() - (rhs._is_wildcard ? 1 : 0);
+			return lhsSize == rhsSize ? title < rhs.title : lhsSize < rhsSize;
+		}
+
+		std::string title;
+		std::vector<assignment_t> assignments;
+
+	private:
+		bool _is_scope_selector;
+		bool _is_wildcard;
+		bool _is_top_level;
+	};
+
+	std::set<ordered_section_t> ordered_sections;
+	for(auto const& section : sections)
+	{
+		ordered_section_t tmp(section.first);
+
+		auto defaultsSection = defaults.find(section.first);
+		for(auto const& pair : section.second)
+		{
+			if(pair.second == NULL_STR)
+				continue;
+
+			if(defaultsSection != defaults.end())
+			{
+				auto it = defaultsSection->second.find(pair.first);
+				if(it != defaultsSection->second.end() && it->second == pair.second)
+					continue;
+			}
+
+			tmp.assignments.emplace_back(pair.first, pair.second);
+		}
+
+		ordered_sections.insert(tmp);
+	}
+
 	if(FILE* fp = fopen(global_settings_path().c_str(), "w"))
 	{
 		fprintf(fp, "# Version 1.0 -- Generated content!\n");
-		for(auto const& section : sections)
+		for(auto const& section : ordered_sections)
 		{
-			if(section.second.empty())
+			if(section.assignments.empty())
 				continue;
+			if(!section.title.empty())
+				fprintf(fp, "\n[ %s ]\n", quote_string(section.title).c_str());
 
-			if(!section.first.empty())
-				fprintf(fp, "\n[ %s ]\n", quote_string(section.first).c_str());
-
-			auto defaultsSection = defaults.find(section.first);
-			for(auto const& pair : section.second)
-			{
-				if(pair.second == NULL_STR)
-					continue;
-
-				if(defaultsSection != defaults.end())
-				{
-					auto it = defaultsSection->second.find(pair.first);
-					if(it != defaultsSection->second.end() && it->second == pair.second)
-						continue;
-				}
-				fprintf(fp, "%-16s = %s\n", pair.first.c_str(), quote_string(pair.second).c_str());
-			}
+			for(auto const& assignment : section.assignments)
+				fprintf(fp, "%-16s = %s\n", assignment.name.c_str(), quote_string(assignment.value).c_str());
 		}
 		fclose(fp);
 	}

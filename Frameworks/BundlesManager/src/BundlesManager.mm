@@ -67,10 +67,10 @@ static NSString* CacheFileForDownload (NSURL* url, NSDate* date)
 @end
 
 @implementation BundlesManager
-+ (BundlesManager*)sharedInstance
++ (instancetype)sharedInstance
 {
-	static BundlesManager* instance = [BundlesManager new];
-	return instance;
+	static BundlesManager* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 - (id)init
@@ -129,7 +129,7 @@ static NSString* CacheFileForDownload (NSURL* url, NSDate* date)
 {
 	NSSet* oldRecommendations = [NSSet setWithArray:[self.bundles filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isRecommended == YES"]]];
 	[self updateRemoteIndexWithCompletionHandler:^{
-		NSArray* bundles = [self.bundles filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"(hasUpdate == YES && isCompatible == YES) || (isInstalled == NO && (isMandatory == YES || (isRecommended == YES && isCompatible == YES && !(SELF IN %@))))", oldRecommendations]];
+		NSArray* bundles = [self.bundles filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"(hasUpdate == YES AND isCompatible == YES) OR (isInstalled == NO AND (isMandatory == YES OR (isRecommended == YES AND isCompatible == YES AND NOT (SELF IN %@))))", oldRecommendations]];
 		[self installBundles:bundles completionHandler:^(NSArray<Bundle*>*){ }];
 	}];
 	[[NSUserDefaults standardUserDefaults] setObject:[NSDate date] forKey:kUserDefaultsLastBundleUpdateCheckKey];
@@ -198,7 +198,7 @@ static NSString* CacheFileForDownload (NSURL* url, NSDate* date)
 	while(Bundle* bundle = [queue lastObject])
 	{
 		[bundlesToInstall addObject:bundle];
-		NSArray* dependencies = [bundle.dependencies filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isInstalled == NO && !(SELF IN %@)", bundlesToInstall]];
+		NSArray* dependencies = [bundle.dependencies filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isInstalled == NO AND NOT (SELF IN %@)", bundlesToInstall]];
 		[dependencies enumerateObjectsUsingBlock:^(Bundle* bundle, NSUInteger, BOOL*){ bundle.dependency = YES; }];
 		[queue replaceObjectsInRange:NSMakeRange(queue.count-1, 1) withObjectsFromArray:dependencies];
 	}
@@ -434,13 +434,75 @@ namespace
 	}
 }
 
+- (void)moveAvianBundles
+{
+	NSFileManager* fm = [NSFileManager defaultManager];
+
+	NSMutableArray* moves = [NSMutableArray array];
+	NSMutableString* moveDescription = [NSMutableString string];
+
+	for(NSString* path in NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask|NSLocalDomainMask, YES))
+	{
+		for(NSString* dir in @[ @"", @"Pristine Copy" ])
+		{
+			NSString* textMateFolder = [NSString pathWithComponents:@[ path, @"TextMate", dir ]];
+			NSString* avianFolder    = [NSString pathWithComponents:@[ path, @"Avian", dir ]];
+			NSString* src = [avianFolder stringByAppendingPathComponent:@"Bundles"];
+			NSString* dst = [textMateFolder stringByAppendingPathComponent:@"Bundles"];
+
+			if([fm fileExistsAtPath:src] == NO)
+				continue;
+
+			if([fm fileExistsAtPath:dst] == YES)
+			{
+				[moves addObject:@[ dst, [dst stringByAppendingString:@"-1.x"] ]];
+				[moveDescription appendFormat:@"Rename “Bundles” at “%@” to “Bundles-1.x” (backup).\n", [textMateFolder stringByAbbreviatingWithTildeInPath]];
+			}
+
+			[moves addObject:@[ src, dst ]];
+			[moveDescription appendFormat:@"Move “Bundles” at “%@” to “%@”.\n", [avianFolder stringByAbbreviatingWithTildeInPath], [textMateFolder stringByAbbreviatingWithTildeInPath]];
+		}
+	}
+
+	if(moves.count == 0)
+		return;
+
+	NSAlert* alert = [[NSAlert alloc] init];
+	alert.alertStyle      = NSInformationalAlertStyle;
+	alert.messageText     = @"Move Bundles?";
+	alert.informativeText = [NSString stringWithFormat:@"Bundles are no longer read from the “Avian” folder. Would you like to move the following items:\n\n%@", moveDescription];
+	[alert addButtonWithTitle:@"Move Bundles"];
+	[alert addButtonWithTitle:@"Cancel"];
+	if([alert runModal] != NSAlertFirstButtonReturn)
+		return;
+
+	for(NSArray* move in moves)
+	{
+		NSError* err;
+
+		NSString* dstFolder = [move.lastObject stringByDeletingLastPathComponent];
+		if([fm fileExistsAtPath:dstFolder] || [fm createDirectoryAtPath:dstFolder withIntermediateDirectories:YES attributes:nil error:&err])
+		{
+			if([fm moveItemAtPath:move.firstObject toPath:move.lastObject error:&err])
+				continue;
+		}
+
+		[[NSAlert alertWithError:err] runModal];
+		break;
+	}
+}
+
 - (void)loadBundlesIndex
 {
+	// LEGACY locations used by 2.0-beta.12.22 and earlier
+	[self moveAvianBundles];
+
 	for(auto path : bundles::locations())
 		bundlesPaths.push_back(path::join(path, "Bundles"));
 	bundlesIndexPath = path::join(path::home(), "Library/Caches/com.macromates.TextMate/BundlesIndex.binary");
 	cache.set_content_filter(&prune_dictionary);
 
+	// LEGACY bundle index used prior to 2.0-alpha.9467
 	std::string const oldPath = path::join(path::home(), "Library/Caches/com.macromates.TextMate/BundlesIndex.plist");
 	if(access(oldPath.c_str(), R_OK) == 0)
 	{
@@ -690,7 +752,7 @@ namespace
 		return;
 
 	NSMutableArray* bundles = [NSMutableArray array];
-	for(Bundle* bundle : [_bundles filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isInstalled == YES && path != NULL"]])
+	for(Bundle* bundle : [_bundles filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"isInstalled == YES AND path != NULL"]])
 	{
 		NSMutableDictionary* dict = [NSMutableDictionary dictionaryWithDictionary:@{
 			@"uuid"     : [bundle.identifier UUIDString],

@@ -27,6 +27,13 @@ namespace oak
 		return prefixFirst == prefixLast;
 	}
 
+	template <int size>
+	bool has_prefix (std::string const& str, char const(&prefix)[size])
+	{
+		// String literals include a trailing zero byte which we skip
+		return size ? str.compare(0, size-1, prefix) == 0 : true;
+	}
+
 	template <typename _InputIter1, typename _InputIter2, typename _InputIter3, typename _OutputIter>
 	_OutputIter replace_copy (_InputIter1 it, _InputIter1 const& srcLast, _InputIter2 const& findFirst, _InputIter2 const& findLast, _InputIter3 const& replaceFirst, _InputIter3 const& replaceLast, _OutputIter out)
 	{
@@ -58,6 +65,13 @@ namespace oak
 		if(t < 1.0)
 			t = 1.0 / (1.0 + exp((-t*12.0)+6.0));
 		return std::min(t, 1.0);
+	}
+
+	template <typename _InputIter>
+	void random_shuffle(_InputIter first, _InputIter last)
+	{
+		static std::mt19937 g(std::random_device{}());
+		std::shuffle(first, last, g);
 	}
 };
 

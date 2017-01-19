@@ -1,16 +1,17 @@
-#import <document/document.h>
-#import <command/runner.h>
+#import <bundles/item.h>
 
-PUBLIC @interface DocumentController : NSObject
+@class OakDocument;
+
+PUBLIC @interface DocumentWindowController : NSObject
 @property (nonatomic) NSWindow*                                  window;
 
-@property (nonatomic) NSString*                                  identifier;
+@property (nonatomic) NSUUID*                                    identifier;
 @property (nonatomic) NSString*                                  defaultProjectPath;
 @property (nonatomic, readonly) NSString*                        projectPath; // effectiveProjectPath
 @property (nonatomic, readonly) NSString*                        untitledSavePath;
 
-@property (nonatomic) std::vector<document::document_ptr>        documents;
-@property (nonatomic) document::document_ptr                     selectedDocument;
+@property (nonatomic) NSArray<OakDocument*>*                     documents;
+@property (nonatomic, readonly) OakDocument*                     selectedDocument;
 @property (nonatomic) NSUInteger                                 selectedTabIndex;
 
 @property (nonatomic) BOOL                                       fileBrowserVisible;
@@ -27,7 +28,6 @@ PUBLIC @interface DocumentController : NSObject
 + (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender;
 
 - (void)showWindow:(id)sender;
-- (void)openAndSelectDocument:(document::document_ptr const&)aDocument;
 - (void)close;
 
 - (IBAction)newFolder:(id)sender;
@@ -43,7 +43,7 @@ PUBLIC @interface DocumentController : NSObject
 - (IBAction)toggleSticky:(id)sender;
 
 - (NSPoint)positionForWindowUnderCaret;
-- (void)performBundleItem:(bundles::item_ptr const&)anItem;
+- (void)performBundleItem:(bundles::item_ptr)anItem;
 - (IBAction)toggleHTMLOutput:(id)sender;
 
 - (IBAction)moveFocus:(id)sender;
@@ -52,7 +52,7 @@ PUBLIC @interface DocumentController : NSObject
 - (IBAction)performCloseSplit:(id)sender;
 - (IBAction)performCloseWindow:(id)sender;
 - (IBAction)performCloseAllTabs:(id)sender;
-- (IBAction)performCloseOtherTabs:(id)sender;
+- (IBAction)performCloseOtherTabsXYZ:(id)sender;
 - (IBAction)performCloseTabsToTheRight:(id)sender;
 
 - (IBAction)saveDocument:(id)sender;
@@ -87,5 +87,5 @@ PUBLIC @interface DocumentController : NSObject
 - (IBAction)orderFrontGoToFolder:(id)sender;
 
 // Used by AppController
-+ (instancetype)controllerForDocument:(document::document_ptr const&)aDocument;
++ (instancetype)controllerForDocument:(OakDocument*)aDocument;
 @end

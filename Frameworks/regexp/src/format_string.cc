@@ -144,7 +144,9 @@ struct expand_visitor : boost::static_visitor<void>
 
 	static std::string capitalize (std::string const& src)
 	{
-		return format_string::replace(format_string::replace(src, "\\A\\p{^Lower}+\\z|\\b\\p{Upper}\\p{^Upper}+?\\b", "${0:/downcase}"), "^([\\W\\d]*)(\\w[-\\w]*)|\\b((?!(?:else|from|over|then|when)\\b)\\w[-\\w]{3,}|\\w[-\\w]*[\\W\\d]*$)", "${1:?$1\\u$2:\\u$0}");
+		static regexp::pattern_t const words  = "\\A\\p{^Lower}+\\z|\\b\\p{Upper}\\p{^Upper}+?\\b";
+		static regexp::pattern_t const upcase = "^([\\W\\d]*)(\\w[-\\w]*)|\\b((?!(?:else|from|over|then|when)\\b)\\w[-\\w]{3,}|\\w[-\\w]*[\\W\\d]*$)";
+		return format_string::replace(format_string::replace(src, words, "${0:/downcase}"), upcase, "${1:?$1\\u$2:\\u$0}");
 	}
 
 	static std::string asciify (std::string const& org)
@@ -152,8 +154,8 @@ struct expand_visitor : boost::static_visitor<void>
 		std::string src = org;
 		if(CFMutableStringRef tmp = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, cf::wrap(src)))
 		{
-			CFStringTransform(tmp, NULL, kCFStringTransformStripDiacritics, false);
-			CFStringTransform(tmp, NULL, kCFStringTransformStripCombiningMarks, false);
+			CFStringTransform(tmp, nullptr, kCFStringTransformStripDiacritics, false);
+			CFStringTransform(tmp, nullptr, kCFStringTransformStripCombiningMarks, false);
 			src = cf::to_s(tmp);
 			CFRelease(tmp);
 		}
@@ -257,10 +259,7 @@ namespace format_string
 	// = format_string_t =
 	// ===================
 
-	format_string_t::format_string_t (parser::nodes_t const& n)
-	{
-		nodes = std::make_shared<parser::nodes_t>(n);
-	}
+	format_string_t::format_string_t (parser::nodes_t const& n) : nodes(std::make_shared<parser::nodes_t>(n)) { }
 
 	void format_string_t::init (std::string const& str, char const* stopChars)
 	{
@@ -271,7 +270,7 @@ namespace format_string
 
 	std::string format_string_t::expand (std::map<std::string, std::string> const& variables) const
 	{
-		expand_visitor v(variables, NULL);
+		expand_visitor v(variables, nullptr);
 		v.traverse(*nodes);
 		v.handle_case_changes();
 		return v.res;
@@ -285,7 +284,7 @@ namespace format_string
 	{
 		D(DBF_FormatString, bug("%s\n", src.c_str()););
 
-		expand_visitor v(variables, NULL);
+		expand_visitor v(variables, nullptr);
 		v.replace(src, ptrn, *format.nodes, repeat);
 		v.handle_case_changes();
 		return v.res;
@@ -293,6 +292,8 @@ namespace format_string
 
 	std::string expand (std::string const& format, std::map<std::string, std::string> const& variables)
 	{
+		if(format.find_first_of("$(\\") == std::string::npos)
+			return format;
 		return format_string_t(format).expand(variables);
 	}
 

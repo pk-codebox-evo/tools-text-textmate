@@ -36,8 +36,8 @@ namespace ng
 			{
 				if(plist::array_t const* value = boost::get<plist::array_t>(&pair))
 				{
-					int32_t const* from = value->size() == 2 ? boost::get<int32_t>(&(*value)[0]) : NULL;
-					int32_t const* to   = value->size() == 2 ? boost::get<int32_t>(&(*value)[1]) : NULL;
+					int32_t const* from = value->size() == 2 ? boost::get<int32_t>(&(*value)[0]) : nullptr;
+					int32_t const* to   = value->size() == 2 ? boost::get<int32_t>(&(*value)[1]) : nullptr;
 					if(from && *from < _buffer.size() && to && *to <= _buffer.size())
 							newFoldings.emplace_back(*from, *to);
 					else	validRanges = false;
@@ -125,7 +125,7 @@ namespace ng
 	{
 		bool found = false;
 
-		std::vector< std::pair<size_t, size_t> > res, newFoldings;
+		std::vector< std::pair<size_t, size_t> > newFoldings;
 		for(auto const& pair : _folded)
 		{
 			if(from == pair.first && pair.second <= to || from <= pair.first && pair.second == to)

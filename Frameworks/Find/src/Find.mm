@@ -3,6 +3,7 @@
 #import "FindWindowController.h"
 #import "FFResultsViewController.h"
 #import "FFDocumentSearch.h"
+#import "CommonAncestor.h"
 #import "Strings.h"
 #import <OakFoundation/OakFindProtocol.h>
 #import <OakFoundation/NSString Additions.h>
@@ -14,18 +15,14 @@
 #import <text/types.h>
 #import <text/utf8.h>
 #import <regexp/format_string.h>
-#import <editor/editor.h>
-#import <document/collection.h>
 #import <document/OakDocument.h>
+#import <document/OakDocumentController.h>
 #import <settings/settings.h>
 
 OAK_DEBUG_VAR(Find_Base);
 
-NSString* const FFSearchInDocument  = @"FFSearchInDocument";
-NSString* const FFSearchInSelection = @"FFSearchInSelection";
-NSString* const FFSearchInOpenFiles = @"FFSearchInOpenFiles";
-
-static std::string const kSearchMarkIdentifier = "search";
+static NSString* const kUserDefaultsKeepSearchResultsOnDoubleClick = @"keepSearchResultsOnDoubleClick";
+static NSString* const kSearchMarkIdentifier = @"search";
 
 enum FindActionTag
 {
@@ -64,10 +61,10 @@ enum FindActionTag
 NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 
 @implementation Find
-+ (Find*)sharedInstance
++ (instancetype)sharedInstance
 {
-	static Find* instance = [Find new];
-	return instance;
+	static Find* sharedInstance = [self new];
+	return sharedInstance;
 }
 
 - (FindWindowController*)windowController
@@ -99,9 +96,8 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 // = Actions for displaying the panel =
 // ====================================
 
-- (void)showFindWindowFor:(NSString*)searchScope
+- (void)showWindow:(id)sender
 {
-	self.windowController.searchIn = searchScope;
 	[self.windowController showWindow:self];
 }
 
@@ -117,16 +113,23 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	{
 		[openPanel beginSheetModalForWindow:self.windowController.window completionHandler:^(NSInteger result) {
 			if(result == NSOKButton)
-				[self showFindWindowFor:[[[[openPanel URLs] lastObject] filePathURL] path]];
+			{
+				self.windowController.otherFolder = [[[[openPanel URLs] lastObject] filePathURL] path];
+				self.windowController.searchTarget = FFSearchTargetOther;
+			}
 			else if([self isVisible]) // Reset selected item in pop-up button
-				self.windowController.searchIn = self.windowController.searchIn;
+				self.windowController.searchTarget = self.windowController.searchTarget;
 		}];
 	}
 	else
 	{
 		[openPanel beginWithCompletionHandler:^(NSInteger result) {
 			if(result == NSOKButton)
-				[self showFindWindowFor:[[[[openPanel URLs] lastObject] filePathURL] path]];
+			{
+				self.windowController.otherFolder = [[[[openPanel URLs] lastObject] filePathURL] path];
+				self.windowController.searchTarget = FFSearchTargetOther;
+				[self showWindow:self];
+			}
 		}];
 	}
 }
@@ -155,6 +158,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	if(_performingFolderSearch)
 	{
 		[_documentSearch stop];
+		[self folderSearchDidFinish:nil];
 		self.windowController.statusString = @"Stopped.";
 	}
 }
@@ -171,51 +175,56 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	else if(action == FindActionCountMatches || action == FindActionFindAll || action == FindActionReplaceAll)
 		_findOptions |= find::all_matches;
 
-	NSString* folder = controller.searchFolder;
-	if(folder || [controller.searchIn isEqualToString:FFSearchInOpenFiles] || (action == FindActionFindAll && [controller.searchIn isEqualToString:FFSearchInDocument] && self.documentIdentifier))
+	FFSearchTarget searchTarget = controller.searchTarget;
+	if(searchTarget != FFSearchTargetSelection && (searchTarget != FFSearchTargetDocument || action == FindActionFindAll && self.documentIdentifier))
 	{
 		switch(action)
 		{
 			case FindActionFindAll:
 			{
-				FFDocumentSearch* folderSearch = [FFDocumentSearch new];
-				folderSearch.searchBinaryFiles = YES;
-				folderSearch.searchString = controller.findString;
-				folderSearch.options      = _findOptions;
-
-				if(self.documentIdentifier && [controller.searchIn isEqualToString:FFSearchInDocument])
+				if(searchTarget == FFSearchTargetDocument && self.documentIdentifier)
 				{
-					folderSearch.documentIdentifier = self.documentIdentifier;
+					if(OakDocument* document = [OakDocumentController.sharedInstance findDocumentWithIdentifier:self.documentIdentifier])
+					{
+						self.documentSearch = nil;
+						self.windowController.showsResultsOutlineView              = YES;
+						self.windowController.resultsViewController.hideCheckBoxes = YES;
+						[self acceptMatches:[document matchesForString:controller.findString options:_findOptions]];
+						[self folderSearchDidFinish:nil];
+					}
 				}
-				else if([controller.searchIn isEqualToString:FFSearchInOpenFiles])
+				else if(searchTarget == FFSearchTargetOpenFiles)
 				{
-					folderSearch.directory = [NSString stringWithCxxString:find::kSearchOpenFiles];
+					self.documentSearch = nil;
+					self.windowController.showsResultsOutlineView              = YES;
+					self.windowController.resultsViewController.hideCheckBoxes = NO;
+					for(OakDocument* document in [OakDocumentController.sharedInstance openDocuments])
+						[self acceptMatches:[document matchesForString:controller.findString options:_findOptions]];
+					[self folderSearchDidFinish:nil];
 				}
 				else
 				{
-					auto const settings = settings_for_path(NULL_STR, "", to_s(folder));
+					NSArray* paths;
+					if(searchTarget == FFSearchTargetProject)
+						paths = @[ self.projectFolder ];
+					else if(searchTarget == FFSearchTargetFileBrowserItems)
+						paths = self.fileBrowserItems;
+					else // searchTarget == FFSearchTargetOther
+						paths = @[ _windowController.otherFolder ];
 
-					path::glob_list_t globs;
-					globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesInFolderSearchKey, NULL_STR), path::kPathItemDirectory);
-					globs.add_exclude_glob(settings.get(kSettingsExcludeDirectoriesKey,               NULL_STR), path::kPathItemDirectory);
-					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesInFolderSearchKey,       NULL_STR), path::kPathItemFile);
-					globs.add_exclude_glob(settings.get(kSettingsExcludeFilesKey,                     NULL_STR), path::kPathItemFile);
-					globs.add_exclude_glob(settings.get(kSettingsExcludeInFolderSearchKey,            NULL_STR));
-					globs.add_exclude_glob(settings.get(kSettingsExcludeKey,                          NULL_STR));
-					if(!controller.searchBinaryFiles)
-						globs.add_exclude_glob(settings.get(kSettingsBinaryKey, NULL_STR));
+					FFDocumentSearch* folderSearch = [FFDocumentSearch new];
+					folderSearch.searchBinaryFiles   = YES;
+					folderSearch.searchString        = controller.findString;
+					folderSearch.options             = _findOptions;
+					folderSearch.paths               = paths;
+					folderSearch.glob                = controller.globString;
+					folderSearch.searchFolderLinks   = controller.searchFolderLinks;
+					folderSearch.searchFileLinks     = controller.searchFileLinks;
+					folderSearch.searchHiddenFolders = controller.searchHiddenFolders;
+					folderSearch.searchBinaryFiles   = controller.searchBinaryFiles;
 
-					globs.add_include_glob(controller.searchHiddenFolders ? "{,.}*" : "*", path::kPathItemDirectory);
-					globs.add_include_glob(to_s(controller.globString), path::kPathItemFile);
-
-					folderSearch.directory         = folder;
-					folderSearch.globList          = globs;
-					folderSearch.searchFolderLinks = controller.searchFolderLinks;
-					folderSearch.searchFileLinks   = controller.searchFileLinks;
-					folderSearch.searchBinaryFiles = controller.searchBinaryFiles;
+					self.documentSearch = folderSearch;
 				}
-
-				self.documentSearch = folderSearch;
 			}
 			break;
 
@@ -239,24 +248,24 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 						replacements.emplace(std::make_pair(child.match.first, child.match.last), controller.regularExpression ? format_string::expand(replaceString, child.match.captures) : replaceString);
 					}
 
-					if(document::document_ptr doc = parent.document)
+					if(OakDocument* doc = parent.document)
 					{
-						if(doc->is_open())
+						if(doc.isLoaded)
 						{
-							doc->replace(replacements, parent.match.crc32);
+							[doc performReplacements:replacements checksum:parent.match.checksum];
 						}
 						else
 						{
-							if(!doc->replace(replacements, parent.match.crc32))
+							if(![doc performReplacements:replacements checksum:parent.match.checksum])
 							{
 								[parent.children setValue:nil forKey:@"replaceString"];
 								continue;
 							}
 
-							[doc->document() saveModalForWindow:self.windowController.window completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
+							[doc saveModalForWindow:self.windowController.window completionHandler:^(OakDocumentIOResult result, NSString* errorMessage, oak::uuid_t const& filterUUID){
 								// TODO Indicate failure when result != OakDocumentIOResultSuccess
-								if(!doc->is_open()) // Ensure document is still closed
-									doc->set_content(NULL_STR);
+								if(!doc.isLoaded) // Ensure document is still closed
+									doc.content = nil;
 							}];
 						}
 
@@ -275,7 +284,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	}
 	else
 	{
-		bool onlySelection = [controller.searchIn isEqualToString:FFSearchInSelection];
+		bool onlySelection = searchTarget == FFSearchTargetSelection;
 		switch(action)
 		{
 			case FindActionFindNext:
@@ -333,10 +342,14 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 // = Accessors =
 // =============
 
-- (void)setProjectFolder:(NSString*)folder { self.windowController.projectFolder = folder; }
-- (NSString*)projectFolder                 { return self.windowController.projectFolder; }
-- (NSString*)searchFolder                  { return self.windowController.searchFolder; }
-- (BOOL)isVisible                          { return self.windowController.window.isVisible; }
+- (void)setSearchTarget:(FFSearchTarget)newTarget { self.windowController.searchTarget = newTarget; }
+- (FFSearchTarget)searchTarget                    { return self.windowController.searchTarget; }
+- (void)setProjectFolder:(NSString*)folder        { self.windowController.projectFolder = folder; }
+- (NSString*)projectFolder                        { return self.windowController.projectFolder; }
+- (void)setFileBrowserItems:(NSArray*)items       { self.windowController.fileBrowserItems = items; }
+- (NSArray*)fileBrowserItems                      { return self.windowController.fileBrowserItems; }
+- (NSString*)searchFolder                         { return self.windowController.searchFolder; }
+- (BOOL)isVisible                                 { return self.windowController.window.isVisible; }
 
 // ===========
 // = Options =
@@ -371,15 +384,15 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	if(_results)
 	{
 		for(FFResultNode* parent in _results.children)
-		{
-			if(document::document_ptr doc = parent.document)
-				doc->remove_all_marks(kSearchMarkIdentifier);
-		}
+			[parent.document removeAllMarksOfType:kSearchMarkIdentifier];
 
 		[self unbind:@"countOfMatches"];
 		[self unbind:@"countOfExcludedMatches"];
 		[self unbind:@"countOfReadOnlyMatches"];
 		[self unbind:@"countOfExcludedReadOnlyMatches"];
+
+		// Update UI dependent on “count of matches”
+		self.countOfMatches = self.countOfExcludedMatches = self.countOfReadOnlyMatches = self.countOfExcludedReadOnlyMatches = 0;
 	}
 
 	_windowController.resultsViewController.results = _results = [FFResultNode new];
@@ -394,6 +407,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		[_documentSearch removeObserver:self forKeyPath:@"currentPath"];
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:FFDocumentSearchDidReceiveResultsNotification object:_documentSearch];
 		[[NSNotificationCenter defaultCenter] removeObserver:self name:FFDocumentSearchDidFinishNotification object:_documentSearch];
+		[_documentSearch stop];
 	}
 
 	if(_documentSearch = newSearcher)
@@ -401,8 +415,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		self.windowController.busy                    = YES;
 		self.windowController.statusString            = MSG_SEARCHING_FMT;
 		self.windowController.showsResultsOutlineView = YES;
-
-		self.windowController.resultsViewController.hideCheckBoxes = _documentSearch.documentIdentifier != nil;
+		self.windowController.resultsViewController.hideCheckBoxes = NO;
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(folderSearchDidReceiveResults:) name:FFDocumentSearchDidReceiveResultsNotification object:_documentSearch];
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(folderSearchDidFinish:) name:FFDocumentSearchDidFinishNotification object:_documentSearch];
@@ -412,25 +425,27 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	}
 }
 
-- (void)folderSearchDidReceiveResults:(NSNotification*)aNotification
+- (void)acceptMatches:(NSArray<OakDocumentMatch*>*)matches
 {
 	NSUInteger countOfExistingItems = _results.children.count;
 
-	NSArray* matches = [aNotification userInfo][@"matches"];
 	FFResultNode* parent = nil;
-	for(FFMatch* match in matches)
+	for(OakDocumentMatch* match in matches)
 	{
-		find::match_t const& m = [match match];
-		if(document::document_ptr doc = m.document)
-			doc->add_mark(m.range.from, kSearchMarkIdentifier);
+		[match.document setMarkOfType:kSearchMarkIdentifier atPosition:match.range.from content:nil];
 
-		FFResultNode* node = [FFResultNode resultNodeWithMatch:m];
-		if(!parent || *parent.document != *node.document)
-			[_results addResultNode:(parent = [FFResultNode resultNodeWithMatch:m baseDirectory:_documentSearch.directory])];
+		FFResultNode* node = [FFResultNode resultNodeWithMatch:match];
+		if(!parent || ![parent.document isEqual:node.document])
+			[_results addResultNode:(parent = [FFResultNode resultNodeWithMatch:match baseDirectory:CommonAncestor(_documentSearch.paths)])];
 		[parent addResultNode:node];
 	}
 
 	[_windowController.resultsViewController insertItemsAtIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(countOfExistingItems, _results.children.count - countOfExistingItems)]];
+}
+
+- (void)folderSearchDidReceiveResults:(NSNotification*)aNotification
+{
+	[self acceptMatches:[aNotification userInfo][@"matches"]];
 }
 
 - (void)addResultsToPasteboard:(id)sender
@@ -439,7 +454,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 	for(FFResultNode* parent in _results.children)
 	{
 		[documents addObject:@{
-			@"identifier"      : [NSString stringWithCxxString:parent.firstResultNode.document->identifier()],
+			@"identifier"      : parent.firstResultNode.document.identifier.UUIDString,
 			@"firstMatchRange" : [NSString stringWithCxxString:parent.firstResultNode.match.range],
 			@"lastMatchRange"  : [NSString stringWithCxxString:parent.lastResultNode.match.range],
 		}];
@@ -451,7 +466,7 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 {
 	self.performingFolderSearch = NO;
 	self.windowController.busy = NO;
-	if(!_documentSearch)
+	if(!_results)
 		return;
 
 	[self bind:@"countOfMatches" toObject:_results withKeyPath:@"countOfLeafs" options:nil];
@@ -469,12 +484,9 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		default: fmt = MSG_MULTIPLE_MATCHES_FMT; break;
 	}
 
-	NSString* msg = [NSString stringWithFormat:fmt, [_documentSearch searchString], [NSNumberFormatter localizedStringFromNumber:@(self.countOfMatches) numberStyle:NSNumberFormatterDecimalStyle]];
-	if(_documentSearch.documentIdentifier)
-	{
-		self.windowController.statusString = msg;
-	}
-	else
+	NSString* searchString = [_documentSearch searchString] ?: self.windowController.findString;
+	NSString* msg = [NSString stringWithFormat:fmt, searchString, [NSNumberFormatter localizedStringFromNumber:@(self.countOfMatches) numberStyle:NSNumberFormatterDecimalStyle]];
+	if(_documentSearch)
 	{
 		NSNumberFormatter* formatter = [NSNumberFormatter new];
 		formatter.numberStyle = NSNumberFormatterDecimalStyle;
@@ -484,16 +496,14 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		self.windowController.statusString          = [msg stringByAppendingFormat:([_documentSearch scannedFileCount] == 1 ? MSG_SEARCHED_FILES_ONE : MSG_SEARCHED_FILES_MULTIPLE), seconds, [NSNumberFormatter localizedStringFromNumber:@([_documentSearch scannedFileCount]) numberStyle:NSNumberFormatterDecimalStyle]];
 		self.windowController.alternateStatusString = [msg stringByAppendingFormat:MSG_SEARCHED_BYTES, seconds, [NSString stringWithCxxString:text::format_size([_documentSearch scannedByteCount])]];
 	}
+	else
+	{
+		self.windowController.statusString = msg;
+	}
 
 	__weak __block id observerId = [[NSNotificationCenter defaultCenter] addObserverForName:OakPasteboardDidChangeNotification object:[OakPasteboard pasteboardWithName:NSFindPboard] queue:nil usingBlock:^(NSNotification*){
-		if(_results)
-		{
-			for(FFResultNode* parent in _results.children)
-			{
-				if(document::document_ptr doc = parent.document)
-					doc->remove_all_marks(kSearchMarkIdentifier);
-			}
-		}
+		for(FFResultNode* parent in _results.children)
+			[parent.document removeAllMarksOfType:kSearchMarkIdentifier];
 		[[NSNotificationCenter defaultCenter] removeObserver:observerId];
 	}];
 }
@@ -524,14 +534,16 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 
 - (void)didSelectResult:(FFResultNode*)item
 {
-	auto doc = item.document;
-	if(!doc->is_open())
-		doc->set_recent_tracking(false);
-	document::show(doc, self.projectIdentifier ? oak::uuid_t(to_s(self.projectIdentifier)) : document::kCollectionAny, item.match.range, false);
+	OakDocument* doc = item.document;
+	if(!doc.isOpen)
+		doc.recentTrackingDisabled = YES;
+	[OakDocumentController.sharedInstance showDocument:doc andSelect:item.match.range inProject:self.projectIdentifier bringToFront:NO];
 }
 
 - (void)didDoubleClickResult:(FFResultNode*)item
 {
+	if([[[NSUserDefaults standardUserDefaults] objectForKey:kUserDefaultsKeepSearchResultsOnDoubleClick] boolValue])
+		return;
 	[self.windowController close];
 }
 
@@ -539,17 +551,15 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 {
 	if(OakIsAlternateKeyOrMouseEvent())
 	{
-		if(item.document->path() != NULL_STR)
+		if(item.document.path)
 		{
-			std::string path = path::relative_to(item.document->path(), to_s(_documentSearch.directory));
+			std::string path = path::relative_to(to_s(item.document.path), to_s(CommonAncestor(_documentSearch.paths)));
 			NSString* newGlob = [_windowController.globString stringByAppendingFormat:@"~%@", [NSString stringWithCxxString:path]];
 			_windowController.globString = newGlob;
 		}
 	}
 
-	if(document::document_ptr doc = item.document)
-		doc->remove_all_marks(kSearchMarkIdentifier);
-
+	[item.document removeAllMarksOfType:kSearchMarkIdentifier];
 	[self addResultsToPasteboard:self];
 
 	NSString* fmt = MSG_SHOWING_ZERO_MATCHES_FMT;
@@ -584,10 +594,11 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 		char key = 0;
 		for(FFResultNode* parent in _results.children)
 		{
-			if(document::document_ptr doc = parent.document)
+			if(OakDocument* doc = parent.document)
 			{
-				NSMenuItem* item = [aMenu addItemWithTitle:[NSString stringWithCxxString:doc->path() == NULL_STR ? doc->display_name() : path::relative_to(doc->path(), to_s(self.searchFolder))] action:@selector(takeSelectedPathFrom:) keyEquivalent:key < 9 ? [NSString stringWithFormat:@"%c", '0' + (++key % 10)] : @""];
-				[item setImage:parent.icon];
+				NSMenuItem* item = [aMenu addItemWithTitle:(doc.path ? to_ns(path::relative_to(to_s(doc.path), to_s(self.searchFolder))) : doc.displayName) action:@selector(takeSelectedPathFrom:) keyEquivalent:key < 9 ? [NSString stringWithFormat:@"%c", '0' + (++key % 10)] : @""];
+				if(aMenu.propertiesToUpdate & NSMenuPropertyItemImage)
+					[item setImage:parent.document.icon];
 				[item setRepresentedObject:parent];
 			}
 		}
@@ -619,16 +630,16 @@ NSString* const FFFindWasTriggeredByEnter = @"FFFindWasTriggeredByEnter";
 
 	for(FFResultNode* item in _windowController.resultsViewController.selectedResults)
 	{
-		find::match_t const& m = item.match;
-		std::string str = m.excerpt;
+		OakDocumentMatch* m = item.match;
+		std::string str = to_s(m.excerpt);
 
 		if(!entireLines)
-			str = str.substr(m.first - m.excerpt_offset, m.last - m.first);
+			str = str.substr(m.first - m.excerptOffset, m.last - m.first);
 		else if(str.size() && str.back() == '\n')
 			str.erase(str.size()-1);
 
 		if(withFilename)
-			str = text::format("%s:%lu\t", [item.path UTF8String], m.line_number + 1) + str;
+			str = text::format("%s:%lu\t", [item.path UTF8String], m.lineNumber + 1) + str;
 
 		res.push_back(str);
 	}
